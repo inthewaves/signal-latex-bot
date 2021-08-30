@@ -9,12 +9,13 @@ import signallatexbot.serialization.TreeSetSerializer
 import signallatexbot.util.toTreeSet
 import java.io.File
 import java.io.IOException
+import java.lang.IllegalStateException
 import java.util.Collections
 import java.util.SortedSet
 import java.util.TreeSet
 
 @Serializable
-class RequestHistory(
+data class RequestHistory(
     val identifier: BotIdentifier,
     @SerialName("history")
     @Serializable(TreeSetSerializer::class)
@@ -94,24 +95,6 @@ class RequestHistory(
         return filterTreeSetInterval(_timedOutRequests, entryToCompareAgainst, intervalMillis)
     }
 
-    fun copyWithNewHistoryEntry(newEntry: Entry): RequestHistory {
-        val newSet = if (history.size > MAX_HISTORY_SIZE) {
-            _history.asSequence().drop(1).plus(newEntry).toTreeSet()
-        } else {
-            _history.asSequence().plus(newEntry).toTreeSet()
-        }
-        return RequestHistory(identifier, newSet, _timedOutRequests)
-    }
-
-    fun copyWithNewTimeoutEntry(newEntry: TimedOutEntry): RequestHistory {
-        val newSet = if (history.size > MAX_HISTORY_SIZE) {
-            _timedOutRequests.asSequence().drop(1).plus(newEntry).toTreeSet()
-        } else {
-            _timedOutRequests.asSequence().plus(newEntry).toTreeSet()
-        }
-        return RequestHistory(identifier, _history, newSet)
-    }
-
     fun writeToDisk() {
         if (!requestHistoryRootDir.exists() && !requestHistoryRootDir.mkdirs()) {
             throw IOException("Unable to make ${requestHistoryRootDir.absolutePath}")
@@ -121,27 +104,9 @@ class RequestHistory(
         historyFile.writeText(Json.encodeToString(serializer(), this))
     }
 
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-
-        other as RequestHistory
-
-        if (identifier != other.identifier) return false
-        if (history != other.history) return false
-
-        return true
-    }
-
-    override fun hashCode(): Int {
-        var result = identifier.hashCode()
-        result = 31 * result + history.hashCode()
-        return result
-    }
-
-    override fun toString(): String {
-        return "RequestHistory(identifier=$identifier, sendTimes=$history)"
-    }
+    @Suppress("UNCHECKED_CAST")
+    fun toBuilder(): Builder =
+        Builder(identifier, _history.clone() as TreeSet<Entry>, _timedOutRequests.clone() as TreeSet<TimedOutEntry>)
 
     companion object {
         private const val MAX_HISTORY_SIZE = 100
@@ -159,6 +124,34 @@ class RequestHistory(
             } else {
                 Json.decodeFromString(serializer(), historyFile.readText())
             }
+        }
+    }
+
+    class Builder {
+        constructor()
+        constructor(identifier: BotIdentifier, history: TreeSet<Entry>, timedOutRequests: TreeSet<TimedOutEntry>) {
+            this.identifier = identifier
+            this.history = history
+            this.timedOutRequests = timedOutRequests
+        }
+
+        var identifier: BotIdentifier? = null
+        var history: TreeSet<Entry> = sortedSetOf()
+        var timedOutRequests: TreeSet<TimedOutEntry> = sortedSetOf()
+
+        fun addHistoryEntry(entry: Entry): Builder {
+            history.add(entry)
+            return this
+        }
+
+        fun addTimedOutEntry(entry: TimedOutEntry): Builder {
+            timedOutRequests.add(entry)
+            return this
+        }
+
+        fun build(): RequestHistory {
+            val id = identifier ?: error { "missing identifier" }
+            return RequestHistory(id, history, timedOutRequests)
         }
     }
 }
