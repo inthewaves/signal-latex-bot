@@ -10,6 +10,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -39,6 +40,7 @@ import java.awt.Color
 import java.awt.Insets
 import java.awt.image.BufferedImage
 import java.io.File
+import java.io.IOException
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -66,35 +68,62 @@ val latexGenerationThreadGroup = ThreadGroup("latex-generation").apply {
 private const val USAGE = "usage: signal-latex-bot accountId outputDirectory"
 private const val SALT_FILENAME = "identifier-hash-salt"
 
+private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
 private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
 private const val LATEX_GENERATION_TIMEOUT_MILLIS = 2000L
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val EXECUTOR_FIXED_THREAD_POOL_COUNT = MAX_CONCURRENT_LATEX_GENERATION + 2
 
-sealed class Reply {
+sealed interface Reply {
     abstract val originalMessage: IncomingMessage
     abstract val replyRecipient: Recipient
     abstract val requestId: RequestId
     abstract val delayRange: LongRange
 
-    data class LatexReply(
+    sealed interface ErrorReply : Reply {
+        val errorMessage: String
+    }
+
+    data class LatexReply (
         override val originalMessage: IncomingMessage,
         override val replyRecipient: Recipient,
         override val requestId: RequestId,
         override val delayRange: LongRange,
         val latexImagePath: String
-    ) : Reply()
+    ) : Reply
 
     data class Error(
         override val originalMessage: IncomingMessage,
         override val replyRecipient: Recipient,
         override val requestId: RequestId,
         override val delayRange: LongRange,
-        val errorMessage: String
-    ) : Reply()
+        override val errorMessage: String
+    ) : ErrorReply
+
+    data class TryAgainMessage(
+        override val originalMessage: IncomingMessage,
+        override val replyRecipient: Recipient,
+        override val requestId: RequestId,
+        override val delayRange: LongRange,
+        private val retryAfterTimestamp: Long,
+        private val currentTimestampUsed: Long,
+    ) : ErrorReply {
+        override val errorMessage: String
+            get() {
+                val seconds = TimeUnit.MILLISECONDS.toSeconds(retryAfterTimestamp - currentTimestampUsed)
+                return if (seconds == 1L) {
+                    "Too many requests! Try again in $seconds second."
+                } else if (seconds > 0L) {
+                    "Too many requests! Try again in $seconds seconds."
+                } else {
+                    "Too many requests! Try again."
+                }
+            }
+    }
 }
 
 val secureRandom = SecureRandom()
+val secureKotlinRandom = secureRandom.asKotlinRandom()
 
 @OptIn(ObsoleteCoroutinesApi::class)
 fun main(args: Array<String>) {
@@ -182,16 +211,18 @@ fun main(args: Array<String>) {
 
             suspend fun sendMessage(reply: Reply) {
                 val msgData: IncomingMessage.Data = reply.originalMessage.data
-                delay(secureRandom.asKotlinRandom().nextLong(reply.delayRange))
-                when (reply) {
-                    is Reply.Error -> {
+                val delayMillis = secureKotlinRandom.nextLong(reply.delayRange)
+                delay(delayMillis)
+                runInterruptible {
+                    fun handleError(errorReply: Reply.ErrorReply) {
                         println(
-                            "sending LaTeX request failure for ${reply.requestId}. " +
-                                    "Failure reason: [${reply.errorMessage}]"
+                            "sending LaTeX request failure for ${errorReply.requestId};" +
+                                    " delayMillis was $delayMillis. " +
+                                    "Failure reason: [${errorReply.errorMessage}]"
                         )
                         signal.send(
-                            recipient = reply.replyRecipient,
-                            messageBody = reply.errorMessage,
+                            recipient = errorReply.replyRecipient,
+                            messageBody = errorReply.errorMessage,
                             quote = JsonQuote(
                                 id = msgData.timestamp,
                                 author = msgData.source,
@@ -199,21 +230,26 @@ fun main(args: Array<String>) {
                             )
                         )
                     }
-                    is Reply.LatexReply -> {
-                        try {
-                            println("sending LaTeX request for ${reply.requestId}")
-                            signal.send(
-                                recipient = reply.replyRecipient,
-                                messageBody = "",
-                                attachments = listOf(JsonAttachment(filename = reply.latexImagePath)),
-                                quote = JsonQuote(
-                                    id = msgData.timestamp,
-                                    author = msgData.source,
-                                    text = msgData.dataMessage?.body
+
+                    when (reply) {
+                        is Reply.Error -> handleError(reply)
+                        is Reply.TryAgainMessage -> handleError(reply)
+                        is Reply.LatexReply -> {
+                            try {
+                                println("sending LaTeX request for ${reply.requestId}; delayMillis was $delayMillis")
+                                signal.send(
+                                    recipient = reply.replyRecipient,
+                                    messageBody = "",
+                                    attachments = listOf(JsonAttachment(filename = reply.latexImagePath)),
+                                    quote = JsonQuote(
+                                        id = msgData.timestamp,
+                                        author = msgData.source,
+                                        text = msgData.dataMessage?.body
+                                    )
                                 )
-                            )
-                        } finally {
-                            Files.deleteIfExists(Path.of(reply.latexImagePath))
+                            } finally {
+                                Files.deleteIfExists(Path.of(reply.latexImagePath))
+                            }
                         }
                     }
                 }
@@ -237,20 +273,26 @@ fun main(args: Array<String>) {
                                 }
                             }
 
-                            val body = message.data.dataMessage?.body
-                            if (body == null) {
-                                println("received a message without a body")
-                                return@consumeEach
-                            }
                             val msgId = message.data.timestamp
                             if (msgId == null) {
                                 println("received a message without a timestamp")
+                                return@consumeEach
+                            }
+                            val serverReceiveTimestamp = message.data.serverReceiverTimestamp
+                            if (serverReceiveTimestamp == null) {
+                                println("received a message without a serverReceiveTimestamp")
                                 return@consumeEach
                             }
 
                             val source = message.data.source?.takeUnless { it.uuid == null || it.number == null }
                             if (source == null) {
                                 println("received a message without a UUID or a number")
+                                return@consumeEach
+                            }
+
+                            val latexBodyInput = message.data.dataMessage?.body
+                            if (latexBodyInput == null) {
+                                println("received a message without a body")
                                 return@consumeEach
                             }
 
@@ -269,65 +311,100 @@ fun main(args: Array<String>) {
                                     result
                                 }
 
+                            launch {
+                                try {
+                                    runInterruptible {
+                                        signal.markRead(source, listOf(msgId))
+                                    }
+                                } catch (e: IOException) {
+                                    System.err.println("failed to send read receipt: ${e.stackTraceToString()}")
+                                }
+                            }
+
                             launch(exceptionHandler) {
                                 val userMutex = identifierMutexesMutex.withLock {
                                     identifierMutexes.getOrPut(identifier) { Mutex() }
                                 }
 
                                 userMutex.withLock {
+                                    delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
+                                    try {
+                                        runInterruptible {
+                                            signal.typing(replyRecipient, isTyping = true)
+                                        }
+                                    } catch (e: IOException) {
+                                        System.err.println(
+                                            "failed to send typing indicator: ${e.stackTraceToString()}"
+                                        )
+                                    }
+
+
                                     val existingHistoryForUser = RequestHistory.readFromFile(identifier)
-                                    existingHistoryForUser
-                                        .copyWithNewSendTime(System.currentTimeMillis())
-                                        .writeToDisk()
+                                    val newHistoryEntry = RequestHistory.Entry(
+                                        serverReceiveTime = serverReceiveTimestamp,
+                                        requestLocalTime = System.currentTimeMillis(),
+                                    )
+                                    val newHistory = existingHistoryForUser.copyWithNewHistoryEntry(newHistoryEntry)
+                                        .apply { writeToDisk() }
                                     val requestId = RequestId.create(identifier)
                                     println("received LaTeX request $requestId")
 
-                                    val sendDelayRange: LongRange = run {
-                                        val lastMinInterval = TimeUnit.MINUTES.toMillis(1)
-                                        val numWithinLastMinute = existingHistoryForUser.countRequestsInInterval(lastMinInterval)
-                                        if (numWithinLastMinute != 0) {
-                                            val hardLimitThreshold = 10
-                                            if (numWithinLastMinute >= hardLimitThreshold) {
-                                                System.err.println(
-                                                    "request $requestId blocked --- too many requests " +
-                                                            "($numWithinLastMinute within last minute)"
-                                                )
-                                                if (numWithinLastMinute == hardLimitThreshold) {
-                                                    val tryAgainSeconds: Long = run {
-                                                        val now = System.currentTimeMillis()
-                                                        val leastRecentTime =
-                                                            existingHistoryForUser.leastRecentTimeInInterval(
-                                                                lastMinInterval
-                                                            )!!
-                                                        val intervalEndTimestamp = leastRecentTime + lastMinInterval
-                                                        TimeUnit.MILLISECONDS.toSeconds(
-                                                            (intervalEndTimestamp - now).coerceAtLeast(0L)
-                                                        )
-                                                    }
-                                                    sendMessage(
-                                                        Reply.Error(
-                                                            requestId = requestId,
-                                                            replyRecipient = replyRecipient,
-                                                            originalMessage = message,
-                                                            delayRange = REPLY_DELAY_RANGE_MILLIS,
-                                                            errorMessage = "Too many requests! " +
-                                                                    "Try again in $tryAgainSeconds seconds."
-                                                        )
-                                                    )
-                                                }
-                                                return@launch
-                                            }
+                                    val minuteMillis = TimeUnit.MINUTES.toMillis(1)
+                                    val entriesWithinLastMinute = existingHistoryForUser
+                                        .entriesWithinInterval(newHistoryEntry, minuteMillis)
+                                    println(
+                                        "entriesWithinLastMinute: " +
+                                                "${entriesWithinLastMinute.map { it.serverReceiveTime }}"
+                                    )
 
-                                            val (baseStart, baseEnd) = REPLY_DELAY_RANGE_MILLIS
-                                                .let { it.first to it.last }
-                                            val extraSeconds = (numWithinLastMinute * numWithinLastMinute / 20.0)
-                                                .coerceAtMost(10.0)
-                                            val delayAddition: Long = (extraSeconds / 1000L).roundToLong()
-                                            println("request $requestId delayed to add $delayAddition ms")
-                                            (baseStart + delayAddition)..(baseEnd + delayAddition)
+                                    val numEntriesInLastMin = entriesWithinLastMinute.size
+                                    val sendDelayRange: LongRange = if (numEntriesInLastMin != 0) {
+                                        val (baseStart, baseEnd) = REPLY_DELAY_RANGE_MILLIS
+                                            .let { it.first to it.last }
+                                        val extraSeconds = (numEntriesInLastMin * numEntriesInLastMin / 18.0)
+                                            .coerceAtMost(10.0)
+                                        val delayAddition: Long = (extraSeconds * 1000L).roundToLong()
+                                        println("request $requestId is getting an extra $delayAddition ms of delay")
+                                        (baseStart + delayAddition)..(baseEnd + delayAddition)
+                                    } else {
+                                        REPLY_DELAY_RANGE_MILLIS
+                                    }
+
+                                    val hardLimitThreshold = 10
+
+                                    val timedOutEntriesInLastMin = existingHistoryForUser
+                                        .timedOutEntriesWithinInterval(newHistoryEntry, minuteMillis)
+                                    if (
+                                        entriesWithinLastMinute.size >= hardLimitThreshold ||
+                                        timedOutEntriesInLastMin.isNotEmpty()
+                                    ) {
+                                        val mostRecentTimeout = timedOutEntriesInLastMin.last()
+                                        val reason = if (mostRecentTimeout != null) {
+                                            "sent a timed-out request in the last minute"
                                         } else {
-                                            REPLY_DELAY_RANGE_MILLIS
+                                            "$numEntriesInLastMin within last minute"
                                         }
+                                        System.err.println(
+                                            "request $requestId blocked --- too many requests ($reason)"
+                                        )
+                                        if (
+                                            entriesWithinLastMinute.size == hardLimitThreshold ||
+                                            mostRecentTimeout != null
+                                        ) {
+                                            val problemTime = mostRecentTimeout?.serverReceiveTime
+                                                ?: entriesWithinLastMinute.first().serverReceiveTime
+                                            sendMessage(
+                                                Reply.TryAgainMessage(
+                                                    requestId = requestId,
+                                                    replyRecipient = replyRecipient,
+                                                    originalMessage = message,
+                                                    delayRange = sendDelayRange,
+                                                    retryAfterTimestamp = problemTime + minuteMillis,
+                                                    currentTimestampUsed = newHistoryEntry.serverReceiveTime
+                                                )
+                                            )
+                                        }
+                                        return@launch
                                     }
 
                                     val latexImagePath: String? = try {
@@ -339,14 +416,14 @@ fun main(args: Array<String>) {
                                             ) {
                                                 val outputFile = File(outputDirectory, "$requestId.png")
                                                     .apply { deleteOnExit() }
-                                                writeLatexToPng(body, outputFile)
+                                                writeLatexToPng(latexBodyInput, outputFile)
                                                 outputFile.absolutePath
                                             }
 
                                         }
                                     } catch (e: Exception) {
                                         System.err.println(
-                                            "failed to parse LaTeX for $identifier: ${e.stackTraceToString()}"
+                                            "Failed to parse LaTeX for request $requestId: ${e.stackTraceToString()}"
                                         )
 
                                         val errorMsg = if (e is ParseException && !e.message.isNullOrBlank()) {
@@ -368,6 +445,10 @@ fun main(args: Array<String>) {
                                     }
 
                                     if (latexImagePath == null) {
+                                        newHistory
+                                            .copyWithNewTimeoutEntry(newHistoryEntry.toTimedOutEntry(latexBodyInput))
+                                            .writeToDisk()
+
                                         sendMessage(
                                             Reply.Error(
                                                 requestId = requestId,
