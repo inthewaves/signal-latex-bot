@@ -6,10 +6,8 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
 import signallatexbot.serialization.TreeSetSerializer
-import signallatexbot.util.toTreeSet
 import java.io.File
 import java.io.IOException
-import java.lang.IllegalStateException
 import java.util.Collections
 import java.util.SortedSet
 import java.util.TreeSet

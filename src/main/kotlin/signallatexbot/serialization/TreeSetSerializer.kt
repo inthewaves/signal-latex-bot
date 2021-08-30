@@ -1,6 +1,5 @@
 package signallatexbot.serialization
 
-import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.descriptors.SerialKind
@@ -12,7 +11,7 @@ import java.util.TreeSet
 
 /**
  * Derived from [kotlinx.serialization.internal.ListLikeSerializer] and
- * [kotlinx.serialization.internal.AbstractCollectionSerializer] from
+ * [kotlinx.serialization.internal.AbstractCollectionSerializer]
  */
 class TreeSetSerializer<T>(
     private val elementSerializer: KSerializer<T>

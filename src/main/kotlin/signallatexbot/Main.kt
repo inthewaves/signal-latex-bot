@@ -1,157 +1,187 @@
 package signallatexbot
 
-import kotlinx.coroutines.CoroutineExceptionHandler
-import kotlinx.coroutines.ObsoleteCoroutinesApi
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.async
-import kotlinx.coroutines.channels.consumeEach
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.subcommands
+import com.github.ajalt.clikt.parameters.options.default
+import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.options.validate
+import com.github.ajalt.clikt.parameters.types.file
+import com.github.ajalt.clikt.parameters.types.int
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.selects.select
-import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
-import org.inthewaves.kotlinsignald.Recipient
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
 import org.inthewaves.kotlinsignald.Signal
 import org.inthewaves.kotlinsignald.SocketUnavailableException
 import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
-import org.inthewaves.kotlinsignald.clientprotocol.v0.structures.JsonAttachment
-import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
-import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
-import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
-import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
-import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
-import org.scilab.forge.jlatexmath.ParseException
-import org.scilab.forge.jlatexmath.TeXConstants
-import org.scilab.forge.jlatexmath.TeXFormula
+import signallatexbot.core.BotConfig
 import signallatexbot.core.MessageProcessor
-import signallatexbot.model.BotIdentifier
-import signallatexbot.model.RequestHistory
-import signallatexbot.model.RequestId
-import signallatexbot.util.LimitedLinkedHashMap
-import java.awt.AlphaComposite
-import java.awt.Color
-import java.awt.Insets
-import java.awt.image.BufferedImage
+import signallatexbot.util.addPosixPermissions
+import signallatexbot.util.changePosixGroup
+import signallatexbot.util.setPosixPermissions
 import java.io.File
 import java.io.IOException
-import java.nio.file.FileSystems
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.attribute.PosixFileAttributeView
-import java.nio.file.attribute.PosixFilePermissions
+import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.UserPrincipalNotFoundException
-import java.security.SecureRandom
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import javax.imageio.ImageIO
-import javax.swing.JLabel
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlin.io.path.absolute
-import kotlin.math.roundToLong
-import kotlin.random.asKotlinRandom
-import kotlin.random.nextLong
 import kotlin.system.exitProcess
-import kotlin.system.measureTimeMillis
 
 val latexGenerationThreadGroup = ThreadGroup("latex-generation").apply {
     // isDaemon = true
 }
 
 private const val USAGE = "usage: signal-latex-bot accountId outputDirectory"
+private const val BOT_NAME = "LaTeX Bot"
+private const val PRIVACY_POLICY = """
+    
+"""
 
-fun main(args: Array<String>) {
-    if (args.size != 2) {
-        System.err.println(USAGE)
-        exitProcess(1)
-    }
-
-    val outputDirectory = File(args[1])
-    if (!outputDirectory.exists() && !outputDirectory.mkdirs()) {
-        println("failed to make output directory ${outputDirectory.absolutePath}")
-        exitProcess(1)
-    }
-
-    val photoDirPermissions = PosixFilePermissions.fromString("rwxr-x---")
-    val currentPerms = Files.getPosixFilePermissions(outputDirectory.toPath())
-    if (currentPerms != photoDirPermissions) {
-        Files.setPosixFilePermissions(outputDirectory.toPath(), photoDirPermissions)
-    }
-
-    val lookupService = FileSystems.getDefault().userPrincipalLookupService
-    val group = try {
-        lookupService.lookupPrincipalByGroupName("signald")!!
-    } catch (e: UserPrincipalNotFoundException) {
-        println("unable to find UNIX group signald")
-        exitProcess(1)
-    }
-    val fileAttributesView = Files.getFileAttributeView(outputDirectory.toPath(), PosixFileAttributeView::class.java)
-    val currentGroupForDir = fileAttributesView.readAttributes().group()
-    if (currentGroupForDir != group) {
-        fileAttributesView.setGroup(group)
-    }
-
-    val signal = try {
-        Signal(args.first())
-    } catch (e: SignaldException) {
-        if (e is SocketUnavailableException) {
-            println("failed to connect to signald: socket is unavailable: ${e.message}")
-        } else {
-            println("failed to connect to signald: ${e.message}")
-        }
-        exitProcess(1)
-    }
-
-    println("Starting bot")
-    runBlocking {
-        MessageProcessor(signal, outputDirectory).use { messageProcessor ->
-            messageProcessor.runProcessor()
-        }
-    }
+class BotCommand : CliktCommand(name = "signal-latex-bot") {
+    override fun run() {}
 }
 
-/**
- * Runs the given [block] on a dedicated [Thread] subject to a timeout that kills the thread. The threads created
- * by this function are daemon threads.
- *
- * This is useful for when there are blocks of code that are neither cancellable nor interrupt-friendly. The given
- * [block] should not modify anything that would require a monitor (do not call synchronized functions, modify shared
- * mutable state, do I/O operations on persistent files, etc.)
- */
-suspend fun <T> withNewThreadAndTimeoutOrNull(
-    timeoutMillis: Long,
-    threadGroup: ThreadGroup? = null,
-    threadName: String? = null,
-    block: () -> T
-): T? = coroutineScope {
-    var thread: Thread? = null
-    val deferredResult = async<T> {
-        suspendCancellableCoroutine { cont ->
-            thread = Thread(threadGroup) {
-                cont.resume(block())
-            }.apply {
-                name = threadName ?: "withNewThreadAndTimeoutOrNull-${id}"
-                isDaemon = true
-                setUncaughtExceptionHandler { _, throwable -> cont.resumeWithException(throwable) }
-                start()
+abstract class BaseSignaldCommand(name: String? = null, help: String = "") : CliktCommand(name = name, help = help) {
+    private val configFile by option(
+        "--config",
+        help = "The config.json file to use for the bot. Defaults to config.json in the working directory"
+    ).file().default(File("config.json")).validate {
+        val errorMessageProvider: () -> String = {
+            val prettyJson = Json { prettyPrint = true }
+            "Please specify a config.json with the --config option or add a " +
+                    "config.json file in the working directory with the following contents:\n" +
+                    prettyJson.encodeToString(BotConfig.serializer(), BotConfig.EXAMPLE_CONFIG)
+        }
+
+        require(it.exists() && it.canRead(), errorMessageProvider)
+        try {
+            Json.decodeFromString(BotConfig.serializer(), it.readText())
+        } catch (e: SerializationException) {
+            fail("Unable to read $it: ${e.message}.\n\n" + errorMessageProvider())
+        }
+    }
+
+    private val socketPath by option()
+
+    private val socketConnectRetries by option().int().default(0)
+
+    private fun getSignalOrThrow(accountId: String): Signal {
+        var retryCount = 0
+        while (true) {
+            try {
+                return Signal(accountId = accountId, socketPath = socketPath)
+            } catch (e: IOException) {
+                System.err.print("error connecting to signald socket (${e::class.java.simpleName}): ${e.message}")
+                if (socketConnectRetries <= 0 || retryCount > socketConnectRetries) {
+                    throw e
+                }
+                System.err.println("retrying in 3 seconds (retries so far: $retryCount)")
+                retryCount++
+                Thread.sleep(TimeUnit.SECONDS.toMillis(3))
             }
         }
     }
 
-    select {
-        deferredResult.onAwait { it }
-        onTimeout(timeoutMillis) {
-            deferredResult.cancel()
-            thread?.stop()
-            null
+    final override fun run() {
+        val botConfig = Json.decodeFromString(BotConfig.serializer(), configFile.readText())
+
+        val signal = try {
+            getSignalOrThrow(botConfig.accountId)
+        } catch (e: SignaldException) {
+            if (e is SocketUnavailableException) {
+                println("failed to connect to signald: socket is unavailable: ${e.message}")
+            } else {
+                println("failed to connect to signald: ${e.message}")
+            }
+            exitProcess(1)
+        }
+
+        runAfterSignaldCheck(botConfig, signal)
+    }
+
+    abstract fun runAfterSignaldCheck(botConfig: BotConfig, signal: Signal)
+}
+
+class UpdateProfileCommand : BaseSignaldCommand(name = "update-profile", help = "Updates the profile of LaTeX bot") {
+    override fun runAfterSignaldCheck(botConfig: BotConfig, signal: Signal) {
+
+        val accountAddress = signal.accountInfo?.address ?: run {
+            System.err.println("${signal.accountId} is not registered with signald")
+            exitProcess(1)
+        }
+
+        val outputDir = File(botConfig.outputPhotoDirectory).also {
+            check(it.exists()) { "output photo directory is missing" }
+        }
+
+        val avatarFileFromConfig = botConfig.avatarFilePath?.let { path ->
+            File(path).apply {
+                check(exists()) { "was given an avatar path $path in the configuration but it doesn't exist" }
+                check(canRead()) { "was given an avatar path $path in the configuration but unable to read" }
+            }
+        }
+        if (avatarFileFromConfig == null) {
+            println("no avatar path given in the configuration")
+        }
+
+        val avatarCopy: File? = avatarFileFromConfig?.let { originalAvatar ->
+            File(outputDir, "${accountAddress.uuid}-avatar.${originalAvatar.extension}").apply {
+                deleteOnExit()
+                originalAvatar.copyTo(this)
+                changePosixGroup("signald")
+                addPosixPermissions(PosixFilePermission.GROUP_READ)
+            }
+        }
+
+        try {
+            val profile = signal.getProfile(address = accountAddress)
+            println("Current profile is $profile")
+            println("Setting profile name to $BOT_NAME")
+            signal.setProfile(
+                name = BOT_NAME,
+                avatarFile = avatarCopy?.absolutePath,
+                about = null,
+                emoji = null,
+                mobileCoinAddress = null,
+            )
+        } finally {
+            avatarCopy?.delete()
         }
     }
+
+}
+
+class RunCommand : BaseSignaldCommand(name = "run", help = "Runs the bot") {
+    override fun runAfterSignaldCheck(botConfig: BotConfig, signal: Signal) {
+        val outputDirectory = File(botConfig.outputPhotoDirectory)
+            .apply { setPosixPermissions("rwxr-x---") }
+
+        try {
+            outputDirectory.changePosixGroup("signald")
+        } catch (e: UserPrincipalNotFoundException) {
+            println("unable to find UNIX group signald")
+            exitProcess(1)
+        }
+
+        val localAccountAddress = signal.accountInfo?.address
+            ?: run {
+                System.err.println("Missing account info --- ${botConfig.accountId} might not be registered with signald")
+                exitProcess(1)
+            }
+
+        val profile = signal.getProfile(address = localAccountAddress)
+        println("Current profile for the bot is $profile --- use the update-profile command if it needs updating")
+
+        println("Starting bot")
+        runBlocking {
+            MessageProcessor(signal, outputDirectory).use { messageProcessor ->
+                messageProcessor.runProcessor()
+            }
+        }
+    }
+
+}
+
+fun main(args: Array<String>) {
+    BotCommand()
+        .subcommands(RunCommand(), UpdateProfileCommand())
+        .main(args)
 }

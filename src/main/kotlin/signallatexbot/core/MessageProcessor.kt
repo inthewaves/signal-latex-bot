@@ -2,14 +2,17 @@ package signallatexbot.core
 
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -30,7 +33,7 @@ import signallatexbot.model.BotIdentifier
 import signallatexbot.model.RequestHistory
 import signallatexbot.model.RequestId
 import signallatexbot.util.LimitedLinkedHashMap
-import signallatexbot.withNewThreadAndTimeoutOrNull
+import signallatexbot.util.addPosixPermissions
 import java.awt.AlphaComposite
 import java.awt.Color
 import java.awt.Insets
@@ -39,18 +42,20 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.imageio.ImageIO
 import javax.swing.JLabel
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.io.path.absolute
 import kotlin.math.roundToLong
 import kotlin.random.Random
 import kotlin.random.asKotlinRandom
 import kotlin.random.nextLong
 import kotlin.system.measureTimeMillis
-import kotlin.time.Duration
 
 private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
@@ -61,10 +66,12 @@ private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val EXECUTOR_FIXED_THREAD_POOL_COUNT = MAX_CONCURRENT_LATEX_GENERATION + 2
 
 class MessageProcessor(private val signal: Signal, private val outputPhotoDir: File) : AutoCloseable {
+    private val botUuid = signal.accountInfo?.address?.uuid ?: error("bot doesn't have UUID")
+
     private val secureRandom = SecureRandom()
     private val secureKotlinRandom = secureRandom.asKotlinRandom()
 
-    private val salt: ByteArray = run {
+    private val identifierHashSalt: ByteArray = run {
         val saltFilePath = Path.of(SALT_FILENAME)
         if (Files.isReadable(saltFilePath)) {
             println("reading salt from ${saltFilePath.absolute()}")
@@ -86,9 +93,9 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
         System.err.println("Error occurred when processing incoming messages: ${throwable.stackTraceToString()}")
     }
 
-    private val addressToIdentifierCache = LimitedLinkedHashMap<String, BotIdentifier>(100)
+    private val addressToIdentifierCache = LimitedLinkedHashMap<String, BotIdentifier>(1000)
 
-    private val processorScope = CoroutineScope(executor.asCoroutineDispatcher() + errorHandler + SupervisorJob())
+    private val processorScope = CoroutineScope(executor.asCoroutineDispatcher() + errorHandler)
 
     suspend fun runProcessor() {
         val mainJob = processorScope.launch {
@@ -112,11 +119,13 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
             }
 
             val messageChannel = signalMessagesChannel(signal)
-            messageChannel.consumeEach { message ->
-                when (message) {
-                    is IncomingMessage -> handleIncomingMessage(message)
-                    is ListenerState -> println("Received listener state update (connected=${message.data.connected})")
-                    is ExceptionWrapper -> println("Received ExceptionWrapper: (${message.data})")
+            supervisorScope {
+                messageChannel.consumeEach { message ->
+                    when (message) {
+                        is IncomingMessage -> handleIncomingMessage(message)
+                        is ListenerState -> println("Received listener state update (connected=${message.data.connected})")
+                        is ExceptionWrapper -> println("Received ExceptionWrapper: (${message.data})")
+                    }
                 }
             }
         }
@@ -147,8 +156,23 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
             return
         }
 
+        val isGroupV1Message = message.data.dataMessage?.group != null
+        if (isGroupV1Message) {
+            println("received a legacy group message, which we don't send to")
+            return
+        }
+
+        val isGroupV2Message = message.data.dataMessage?.groupV2 != null
+        if (isGroupV2Message) {
+            val mentionToBot = message.data.dataMessage?.mentions?.find { it.uuid == botUuid }
+            if (mentionToBot == null) {
+                println("received a V2 group message without a mention")
+                return
+            }
+        }
+
         val latexBodyInput = message.data.dataMessage?.body
-        if (latexBodyInput == null) {
+        if (latexBodyInput.isNullOrBlank()) {
             println("received a message without a body")
             return
         }
@@ -163,7 +187,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
         val identifier = addressToIdentifierCache
             .getOrPut(BotIdentifier.getIdentifierToUse(source)) {
                 val result: BotIdentifier
-                val time = measureTimeMillis { result = BotIdentifier.create(source, salt) }
+                val time = measureTimeMillis { result = BotIdentifier.create(source, identifierHashSalt) }
                 println("generated hashed identifier in $time ms for $result due to cache miss")
                 result
             }
@@ -253,12 +277,12 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                                 timeoutMillis = LATEX_GENERATION_TIMEOUT_MILLIS,
                                 threadGroup = latexGenerationThreadGroup
                             ) {
-                                val outputFile = File(outputPhotoDir, "$requestId.png")
+                                File(outputPhotoDir, "${requestId.timestamp}.png")
                                     .apply { deleteOnExit() }
-                                writeLatexToPng(latexBodyInput, outputFile)
-                                outputFile.absolutePath
+                                    .also { outFile -> writeLatexToPng(latexBodyInput, outFile) }
+                                    .apply { addPosixPermissions(PosixFilePermission.GROUP_READ) }
+                                    .absolutePath
                             }
-
                         }
                     } catch (e: Exception) {
                         System.err.println("Failed to parse LaTeX for request $requestId: ${e.stackTraceToString()}")
@@ -315,7 +339,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
         require(!outputFile.isDirectory) { "output file can't be a directory" }
 
         val formula = TeXFormula(latexString)
-        val icon = formula.createTeXIcon(TeXConstants.STYLE_DISPLAY, 40f).apply {
+        val icon = formula.createTeXIcon(TeXConstants.STYLE_DISPLAY, 70f).apply {
             val insetSize = 50
             insets = Insets(insetSize, insetSize, insetSize, insetSize)
         }
@@ -492,7 +516,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
     private val sendSemaphore = Semaphore(permits = MAX_CONCURRENT_MSG_SENDS)
 
     private suspend fun sendMessage(reply: Reply): Unit = sendSemaphore.withPermit {
-        val msgData: IncomingMessage.Data = reply.originalMessage.data
+        val originalMsgData: IncomingMessage.Data = reply.originalMessage.data
         println("sending LaTeX request for ${reply.requestId} after a ${reply.delay} ms delay")
         delay(reply.delay)
         runInterruptible {
@@ -505,10 +529,11 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                     recipient = errorReply.replyRecipient,
                     messageBody = errorReply.errorMessage,
                     quote = JsonQuote(
-                        id = msgData.timestamp,
-                        author = msgData.source,
-                        text = msgData.dataMessage?.body
-                    )
+                        id = originalMsgData.timestamp,
+                        author = originalMsgData.source,
+                        text = originalMsgData.dataMessage?.body,
+                        mentions = originalMsgData.dataMessage?.mentions ?: emptyList()
+                    ),
                 )
             }
 
@@ -522,10 +547,11 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                             messageBody = "",
                             attachments = listOf(JsonAttachment(filename = reply.latexImagePath)),
                             quote = JsonQuote(
-                                id = msgData.timestamp,
-                                author = msgData.source,
-                                text = msgData.dataMessage?.body
-                            )
+                                id = originalMsgData.timestamp,
+                                author = originalMsgData.source,
+                                text = originalMsgData.dataMessage?.body,
+                                mentions = originalMsgData.dataMessage?.mentions ?: emptyList()
+                            ),
                         )
                     } finally {
                         Files.deleteIfExists(Path.of(reply.latexImagePath))
@@ -537,5 +563,43 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
 
     override fun close() {
         executor.shutdown()
+    }
+}
+
+/**
+ * Runs the given [block] on a dedicated [Thread] subject to a timeout that kills the thread. The threads created
+ * by this function are daemon threads.
+ *
+ * This is useful for when there are blocks of code that are neither cancellable nor interrupt-friendly. The given
+ * [block] should not modify anything that would require a monitor (do not call synchronized functions, modify shared
+ * mutable state, do I/O operations on persistent files, etc.)
+ */
+suspend fun <T> withNewThreadAndTimeoutOrNull(
+    timeoutMillis: Long,
+    threadGroup: ThreadGroup? = null,
+    threadName: String? = null,
+    block: () -> T
+): T? = coroutineScope {
+    var thread: Thread? = null
+    val deferredResult = async<T> {
+        suspendCancellableCoroutine { cont ->
+            thread = Thread(threadGroup) {
+                cont.resume(block())
+            }.apply {
+                name = threadName ?: "withNewThreadAndTimeoutOrNull-${id}"
+                isDaemon = true
+                setUncaughtExceptionHandler { _, throwable -> cont.resumeWithException(throwable) }
+                start()
+            }
+        }
+    }
+
+    select {
+        deferredResult.onAwait { it }
+        onTimeout(timeoutMillis) {
+            deferredResult.cancel()
+            thread?.stop()
+            null
+        }
     }
 }
