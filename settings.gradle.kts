@@ -1,3 +1,3 @@
 
-rootProject.name = "latex-test"
+rootProject.name = "signal-latex-bot"
 
