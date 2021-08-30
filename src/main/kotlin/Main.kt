@@ -180,6 +180,7 @@ fun main(args: Array<String>) {
     val insetSize = 50
     icon.insets = Insets(insetSize, insetSize, insetSize, insetSize)
 
+    // FIXME: This doesn't work
     val transparentBackground = true
 
     val bufferedImage = BufferedImage(icon.iconWidth, icon.iconHeight, BufferedImage.TYPE_INT_ARGB /* ARGB for transparency */)
