@@ -1,4 +1,4 @@
-package signallatexbot
+package signallatexbot.util
 
 object Hex {
     private const val HEX_CHARS = "0123456789abcdef"
