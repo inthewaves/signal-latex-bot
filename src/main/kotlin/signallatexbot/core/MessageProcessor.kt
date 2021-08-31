@@ -372,12 +372,12 @@ class MessageProcessor(
                             "handling remote delete message from ${identifier.value.take(10)}, " +
                                     "targetTimestamp: $targetTimestamp"
                         )
+                        delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
                         val historyEntryOfTarget = existingHistoryForUser.history
                             .asSequence<RequestHistory.BaseEntry>()
                             .plus(existingHistoryForUser.timedOut)
                             .find { it.clientSentTimestamp == targetTimestamp }
                         if (historyEntryOfTarget != null) {
-                            delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
                             sendSemaphore.withPermit {
                                 runInterruptible {
                                     signal.remoteDelete(replyRecipient, historyEntryOfTarget.replyMessageTimestamp)
