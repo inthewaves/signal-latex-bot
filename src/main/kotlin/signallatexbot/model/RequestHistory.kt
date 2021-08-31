@@ -13,7 +13,7 @@ import java.util.SortedSet
 import java.util.TreeSet
 
 @Serializable
-data class RequestHistory(
+class RequestHistory private constructor(
     val identifier: BotIdentifier,
     @SerialName("history")
     @Serializable(TreeSetSerializer::class)
@@ -28,29 +28,46 @@ data class RequestHistory(
     @Transient
     val timedOut: SortedSet<TimedOutEntry> = Collections.unmodifiableSortedSet(_timedOutRequests)
 
-    interface BaseEntry : Comparable<BaseEntry> {
+    sealed interface BaseEntry : Comparable<BaseEntry> {
+        /**
+         * The client-supplied timestamp of the message, used to identify messages for reactions, remote deletes,
+         * etc.
+         */
+        val clientSentTimestamp: Long
+
+        /**
+         * The time that the server received the message. This will be used for comparisons and rate limiting.
+         */
         val serverReceiveTime: Long
-        val requestLocalTime: Long
+
+        /**
+         * Our timestamp for the message reply. This will be used to identify our sent messages to act on remote
+         * delete requests.
+         */
+        val replyMessageTimestamp: Long
 
         override fun compareTo(other: BaseEntry): Int = serverReceiveTime.compareTo(other.serverReceiveTime)
     }
 
     @Serializable
     data class Entry(
+        override val clientSentTimestamp: Long,
         override val serverReceiveTime: Long,
-        override val requestLocalTime: Long
+        override val replyMessageTimestamp: Long
     ) : BaseEntry {
         fun toTimedOutEntry(latex: String) = TimedOutEntry(
+            clientSentTimestamp,
             serverReceiveTime,
-            requestLocalTime,
+            replyMessageTimestamp,
             Base64String.create(latex.encodeToByteArray())
         )
     }
 
     @Serializable
     data class TimedOutEntry(
+        override val clientSentTimestamp: Long,
         override val serverReceiveTime: Long,
-        override val requestLocalTime: Long,
+        override val replyMessageTimestamp: Long,
         val latex: Base64String
     ) : BaseEntry
 
@@ -102,12 +119,35 @@ data class RequestHistory(
         historyFile.writeText(Json.encodeToString(serializer(), this))
     }
 
-    @Suppress("UNCHECKED_CAST")
-    fun toBuilder(): Builder =
-        Builder(identifier, _history.clone() as TreeSet<Entry>, _timedOutRequests.clone() as TreeSet<TimedOutEntry>)
+    fun toBuilder(): Builder = Builder(this)
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as RequestHistory
+
+        if (identifier != other.identifier) return false
+        if (_history != other._history) return false
+        if (_timedOutRequests != other._timedOutRequests) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = identifier.hashCode()
+        result = 31 * result + _history.hashCode()
+        result = 31 * result + _timedOutRequests.hashCode()
+        return result
+    }
+
+    override fun toString(): String {
+        return "RequestHistory(identifier=$identifier, history=$history, timedOut=$timedOut)"
+    }
 
     companion object {
         private const val MAX_HISTORY_SIZE = 100
+        private const val MAX_TIMEOUT_HISTORY_SIZE = 100
 
         private val requestHistoryRootDir = File("history")
 
@@ -125,31 +165,34 @@ data class RequestHistory(
         }
     }
 
-    class Builder {
-        constructor()
-        constructor(identifier: BotIdentifier, history: TreeSet<Entry>, timedOutRequests: TreeSet<TimedOutEntry>) {
-            this.identifier = identifier
-            this.history = history
-            this.timedOutRequests = timedOutRequests
+    class Builder(private val identifier: BotIdentifier) {
+        constructor(requestHistory: RequestHistory) : this(requestHistory.identifier) {
+            @Suppress("UNCHECKED_CAST")
+            this.history = requestHistory._history.clone() as TreeSet<Entry>
+            @Suppress("UNCHECKED_CAST")
+            this.timedOutRequests = requestHistory._timedOutRequests.clone() as TreeSet<TimedOutEntry>
         }
-
-        var identifier: BotIdentifier? = null
-        var history: TreeSet<Entry> = sortedSetOf()
-        var timedOutRequests: TreeSet<TimedOutEntry> = sortedSetOf()
+        private var history: TreeSet<Entry> = sortedSetOf()
+        private var timedOutRequests: TreeSet<TimedOutEntry> = sortedSetOf()
 
         fun addHistoryEntry(entry: Entry): Builder {
+            if (history.size >= MAX_HISTORY_SIZE) {
+                history.remove(history.first())
+            }
             history.add(entry)
             return this
         }
 
         fun addTimedOutEntry(entry: TimedOutEntry): Builder {
+            if (timedOutRequests.size >= MAX_TIMEOUT_HISTORY_SIZE) {
+                timedOutRequests.remove(timedOutRequests.first())
+            }
             timedOutRequests.add(entry)
             return this
         }
 
         fun build(): RequestHistory {
-            val id = identifier ?: error { "missing identifier" }
-            return RequestHistory(id, history, timedOutRequests)
+            return RequestHistory(identifier, history, timedOutRequests)
         }
     }
 }

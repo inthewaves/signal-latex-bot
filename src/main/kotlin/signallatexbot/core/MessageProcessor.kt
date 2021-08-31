@@ -24,6 +24,7 @@ import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrappe
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.RemoteDelete
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
 import org.scilab.forge.jlatexmath.TeXConstants
@@ -61,7 +62,7 @@ private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
 private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
 private const val LATEX_GENERATION_TIMEOUT_MILLIS = 2000L
-private const val MAX_CONCURRENT_MSG_SENDS = 10
+private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val EXECUTOR_FIXED_THREAD_POOL_COUNT = MAX_CONCURRENT_LATEX_GENERATION + 2
 
@@ -132,6 +133,29 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
         mainJob.join()
     }
 
+    private sealed interface IncomingMessageType {
+        @JvmInline
+        value class LatexRequestMessage(val latexText: String) : IncomingMessageType
+        @JvmInline
+        value class RemoteDeleteMessage(val remoteDelete: RemoteDelete) : IncomingMessageType
+        object InvalidMessage : IncomingMessageType
+
+        companion object {
+            fun getHandleType(incomingMessage: IncomingMessage): IncomingMessageType {
+                val remoteDelete = incomingMessage.data.dataMessage?.remoteDelete
+                val body = incomingMessage.data.dataMessage?.body
+
+                return if (remoteDelete != null) {
+                    RemoteDeleteMessage(remoteDelete)
+                } else if (!body.isNullOrBlank()) {
+                    LatexRequestMessage(body)
+                } else {
+                    InvalidMessage
+                }
+            }
+        }
+    }
+
     private fun CoroutineScope.handleIncomingMessage(message: IncomingMessage) {
         message.data.dataMessage?.reaction?.let { jsonReaction ->
             if (jsonReaction.targetAuthor?.uuid == signal.accountInfo!!.address?.uuid) {
@@ -171,16 +195,16 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
             }
         }
 
-        val latexBodyInput = message.data.dataMessage?.body
-        if (latexBodyInput.isNullOrBlank()) {
-            println("received a message without a body")
-            return
-        }
-
         val replyRecipient = try {
             Recipient.forReply(message)
         } catch (e: NullPointerException) {
             println("failed to get reply recipient")
+            return
+        }
+
+        val msgType = IncomingMessageType.getHandleType(message)
+        if (msgType is IncomingMessageType.InvalidMessage) {
+            println("message doesn't have body")
             return
         }
 
@@ -194,8 +218,10 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
 
         launch {
             try {
-                runInterruptible {
-                    signal.markRead(source, listOf(msgId))
+                sendSemaphore.withPermit {
+                    runInterruptible {
+                        signal.markRead(source, listOf(msgId))
+                    }
                 }
             } catch (e: IOException) {
                 System.err.println("failed to send read receipt: ${e.stackTraceToString()}")
@@ -208,6 +234,33 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
             }
 
             userMutex.withLock {
+                val existingHistoryForUser = RequestHistory.readFromFile(identifier)
+                val latexBodyInput = when (msgType) {
+                    is IncomingMessageType.InvalidMessage -> return@withLock
+                    is IncomingMessageType.RemoteDeleteMessage -> {
+                        val targetTimestamp = msgType.remoteDelete.targetSentTimestamp
+                        val historyEntryOfTarget = existingHistoryForUser.history
+                            .asSequence<RequestHistory.BaseEntry>()
+                            .plus(existingHistoryForUser.timedOut)
+                            .find { it.clientSentTimestamp == targetTimestamp }
+                        if (historyEntryOfTarget != null) {
+                            println(
+                                "handling remote delete message from ${identifier.value.take(10)}, " +
+                                        "target: $historyEntryOfTarget"
+                            )
+                            sendSemaphore.withPermit {
+                                runInterruptible {
+                                    signal.remoteDelete(replyRecipient, historyEntryOfTarget.replyMessageTimestamp)
+                                }
+                            }
+                        } else {
+                            println("unable to time ${identifier.value.take(10)}")
+                        }
+                        return@withLock
+                    }
+                    is IncomingMessageType.LatexRequestMessage -> msgType.latexText
+                }
+
                 delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
                 launch {
                     try {
@@ -221,10 +274,10 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                     }
                 }
 
-                val existingHistoryForUser = RequestHistory.readFromFile(identifier)
                 val newHistoryEntry = RequestHistory.Entry(
+                    clientSentTimestamp = msgId,
                     serverReceiveTime = serverReceiveTimestamp,
-                    requestLocalTime = System.currentTimeMillis(),
+                    replyMessageTimestamp = System.currentTimeMillis(),
                 )
 
                 val newHistoryBuilder = existingHistoryForUser.toBuilder().addHistoryEntry(newHistoryEntry)
@@ -256,12 +309,13 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                                             replyRecipient = replyRecipient,
                                             originalMessage = message,
                                             delay = rateLimitStatus.sendDelay,
+                                            replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                             retryAfterTimestamp = rateLimitStatus.retryAfterTimestamp,
                                             currentTimestampUsed = rateLimitStatus.currentTimestampUsed
                                         )
                                     )
                                 }
-                                else -> System.err.println("Warning: Unexpected state")
+                                else -> System.err.println("Warning: Unexpected blocked state")
                             }
                             return@launch
                         }
@@ -299,6 +353,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                                 replyRecipient = replyRecipient,
                                 originalMessage = message,
                                 delay = sendDelay,
+                                replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                 errorMessage = errorMsg
                             )
                         )
@@ -314,6 +369,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                                 replyRecipient = replyRecipient,
                                 originalMessage = message,
                                 delay = sendDelay,
+                                replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                 errorMessage = "Failed to parse LaTeX: Timed out"
                             )
                         )
@@ -324,6 +380,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                                 replyRecipient = replyRecipient,
                                 originalMessage = message,
                                 delay = sendDelay,
+                                replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                 latexImagePath = latexImagePath
                             )
                         )
@@ -471,6 +528,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
         val replyRecipient: Recipient
         val requestId: RequestId
         val delay: Long
+        val replyTimestamp: Long
 
         sealed interface ErrorReply : Reply {
             val errorMessage: String
@@ -481,6 +539,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
             override val replyRecipient: Recipient,
             override val requestId: RequestId,
             override val delay: Long,
+            override val replyTimestamp: Long,
             val latexImagePath: String
         ) : Reply
 
@@ -489,6 +548,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
             override val replyRecipient: Recipient,
             override val requestId: RequestId,
             override val delay: Long,
+            override val replyTimestamp: Long,
             override val errorMessage: String
         ) : ErrorReply
 
@@ -497,6 +557,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
             override val replyRecipient: Recipient,
             override val requestId: RequestId,
             override val delay: Long,
+            override val replyTimestamp: Long,
             private val retryAfterTimestamp: Long,
             private val currentTimestampUsed: Long,
         ) : ErrorReply {
@@ -534,6 +595,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                         text = originalMsgData.dataMessage?.body,
                         mentions = originalMsgData.dataMessage?.mentions ?: emptyList()
                     ),
+                    timestamp = errorReply.replyTimestamp
                 )
             }
 
@@ -552,6 +614,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                                 text = originalMsgData.dataMessage?.body,
                                 mentions = originalMsgData.dataMessage?.mentions ?: emptyList()
                             ),
+                            timestamp = reply.replyTimestamp
                         )
                     } finally {
                         Files.deleteIfExists(Path.of(reply.latexImagePath))
@@ -570,9 +633,10 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
  * Runs the given [block] on a dedicated [Thread] subject to a timeout that kills the thread. The threads created
  * by this function are daemon threads.
  *
- * This is useful for when there are blocks of code that are neither cancellable nor interrupt-friendly. The given
- * [block] should not modify anything that would require a monitor (do not call synchronized functions, modify shared
- * mutable state, do I/O operations on persistent files, etc.)
+ * This is useful for when there are blocks of code that are neither cancellable nor interrupt-friendly. Due to this
+ * function calling the deprecated [Thread.stop] function, the [block] should not modify anything that would require a
+ * monitor (do not call synchronized functions, modify shared mutable state, do I/O operations on persistent files,
+ * etc.)
  */
 suspend fun <T> withNewThreadAndTimeoutOrNull(
     timeoutMillis: Long,
