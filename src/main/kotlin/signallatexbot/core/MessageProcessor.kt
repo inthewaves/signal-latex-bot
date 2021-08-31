@@ -177,8 +177,13 @@ class MessageProcessor(
                 messageChannel.consumeEach { message ->
                     when (message) {
                         is IncomingMessage -> handleIncomingMessage(message)
-                        is ListenerState -> println("Received listener state update (connected=${message.data.connected})")
-                        is ExceptionWrapper -> println("Received ExceptionWrapper: (${message.data})")
+                        is ListenerState -> {
+                            println("Received listener state update (connected=${message.data.connected})")
+                        }
+                        is ExceptionWrapper -> {
+                            println("Received ExceptionWrapper: (${message.data})")
+                            handleExceptionWrapperMessage(message)
+                        }
                     }
                 }
             }
@@ -205,6 +210,66 @@ class MessageProcessor(
                 } else {
                     InvalidMessage
                 }
+            }
+        }
+    }
+
+    private val lastTrustAllAttemptTimestamp = AtomicLong(0L)
+    private val trustAllMutex = Mutex()
+
+    private suspend fun trustAllUntrustedIdentityKeys() {
+        trustAllMutex.withLock {
+            val now = System.currentTimeMillis()
+            if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
+                println("Not trusting identity keys --- too early")
+                return
+            }
+            lastTrustAllAttemptTimestamp.set(now)
+
+            println("Trusting all untrusted identity keys")
+            runInterruptible { signal.getAllIdentities() }
+                .identityKeys
+                .asSequence()
+                .filter { it.address != null }
+                .forEach { identityKeyList ->
+                    val address = identityKeyList.address!!
+                    val identifier = addressToIdentifierCache.get(address)
+                    identityKeyList.identities.asSequence()
+                        .filter { it.trustLevel == "UNTRUSTED" }
+                        .map { identityKey ->
+                            identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
+                                ?: identityKey.qrCodeData?.let { Fingerprint.QrCodeData(it) }
+                        }
+                        .filterNotNull()
+                        .forEach { fingerprint ->
+                            println("attempting to untrusted identity key for $identifier")
+                            runInterruptible {
+                                try {
+                                    signal.trust(
+                                        address,
+                                        fingerprint,
+                                        TrustLevel.TRUSTED_UNVERIFIED
+                                    )
+                                    println("trusted an identity key for $identifier")
+                                } catch (e: SignaldException) {
+                                    System.err.println("unable to trust an identity key for $identifier")
+                                }
+                            }
+                        }
+                }
+        }
+    }
+
+    private fun CoroutineScope.handleExceptionWrapperMessage(message: ExceptionWrapper) {
+        launch {
+            if (message.data.message?.contains("ProtocolUntrustedIdentityException") == true) {
+                // If a user's safety number changes, their incoming messages will just be received as ExceptionWrapper
+                // messages with "org.signal.libsignal.metadata.ProtocolUntrustedIdentityException" as the message. We
+                // may never be able to get their actual messages until we trust their new identity key(s).
+                //
+                // Since the ExceptionWrapper message doesn't specify who the user is, we have to trust all untrusted
+                // identity keys.
+                trustAllUntrustedIdentityKeys()
             }
         }
     }
