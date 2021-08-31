@@ -218,47 +218,51 @@ class MessageProcessor(
     private val lastTrustAllAttemptTimestamp = AtomicLong(0L)
     private val trustAllMutex = Mutex()
 
-    private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false) {
+    private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = coroutineScope {
         trustAllMutex.withLock {
             if (bypassTimeCheck) {
                 val now = System.currentTimeMillis()
                 if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
                     println("Not trusting identity keys --- too early")
-                    return
+                    return@coroutineScope
                 }
                 lastTrustAllAttemptTimestamp.set(now)
             }
 
+            val trustCallMutex = Mutex()
             println("Trusting all untrusted identity keys")
             runInterruptible { signal.getAllIdentities() }
                 .identityKeys
                 .asSequence()
                 .filter { it.address != null }
                 .forEach { identityKeyList ->
-                    val address = identityKeyList.address!!
-                    val identifier = addressToIdentifierCache.get(address)
-                    identityKeyList.identities.asSequence()
-                        .filter { it.trustLevel == "UNTRUSTED" }
-                        .map { identityKey ->
-                            identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
-                                ?: identityKey.qrCodeData?.let { Fingerprint.QrCodeData(it) }
-                        }
-                        .filterNotNull()
-                        .forEach { fingerprint ->
-                            println("attempting to untrusted identity key for $identifier")
-                            runInterruptible {
+                    launch {
+                        val address = identityKeyList.address!!
+                        val identifier = addressToIdentifierCache.get(address)
+                        identityKeyList.identities.asSequence()
+                            .filter { it.trustLevel == "UNTRUSTED" }
+                            .map { identityKey ->
+                                identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
+                                    ?: identityKey.qrCodeData?.let { Fingerprint.QrCodeData(it) }
+                            }
+                            .filterNotNull()
+                            .forEach { fingerprint ->
                                 try {
-                                    signal.trust(
-                                        address,
-                                        fingerprint,
-                                        TrustLevel.TRUSTED_UNVERIFIED
-                                    )
-                                    println("trusted an identity key for $identifier")
+                                    trustCallMutex.withLock {
+                                        runInterruptible {
+                                            signal.trust(
+                                                address,
+                                                fingerprint,
+                                                TrustLevel.TRUSTED_UNVERIFIED
+                                            )
+                                        }
+                                        println("trusted an identity key for $identifier")
+                                    }
                                 } catch (e: SignaldException) {
                                     System.err.println("unable to trust an identity key for $identifier")
                                 }
                             }
-                        }
+                    }
                 }
         }
     }
