@@ -7,16 +7,16 @@ import signallatexbot.util.Hex
 
 @Serializable
 @JvmInline
-value class BotIdentifier private constructor(val value: String) {
+value class UserIdentifier private constructor(val value: String) {
     override fun toString(): String = value
     companion object {
         fun getIdentifierToUse(address: JsonAddress) = address.uuid
             ?: address.number
             ?: throw IllegalArgumentException("address missing both uuid and number")
 
-        fun create(address: JsonAddress, salt: ByteArray): BotIdentifier {
+        fun create(address: JsonAddress, salt: ByteArray): UserIdentifier {
             val originalIdentifier = getIdentifierToUse(address)
-            return BotIdentifier(
+            return UserIdentifier(
                 Hex.encode(SCrypt.generate(originalIdentifier.encodeToByteArray(), salt, 32768, 8, 1, 32))
             )
         }

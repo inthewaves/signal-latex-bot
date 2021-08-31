@@ -10,6 +10,6 @@ value class RequestId private constructor(val id: String) {
     companion object {
         val timestampComparator = compareBy<RequestId> { it.timestamp }
 
-        fun create(identifier: BotIdentifier) = RequestId("${identifier.value}-${System.currentTimeMillis()}")
+        fun create(identifier: UserIdentifier) = RequestId("${identifier.value}-${System.currentTimeMillis()}")
     }
 }

@@ -34,9 +34,9 @@ import org.scilab.forge.jlatexmath.ParseException
 import org.scilab.forge.jlatexmath.TeXConstants
 import org.scilab.forge.jlatexmath.TeXFormula
 import signallatexbot.latexGenerationThreadGroup
-import signallatexbot.model.BotIdentifier
 import signallatexbot.model.RequestHistory
 import signallatexbot.model.RequestId
+import signallatexbot.model.UserIdentifier
 import signallatexbot.util.AddressIdentifierCache
 import signallatexbot.util.addPosixPermissions
 import java.awt.AlphaComposite
@@ -96,7 +96,7 @@ class MessageProcessor(
     private val latexGenerationSemaphore = Semaphore(permits = MAX_CONCURRENT_LATEX_GENERATION)
 
     private val identifierMutexesMutex = Mutex()
-    private val identifierMutexes = hashMapOf<BotIdentifier, Mutex>()
+    private val identifierMutexes = hashMapOf<UserIdentifier, Mutex>()
 
     private val executor = Executors.newFixedThreadPool(EXECUTOR_FIXED_THREAD_POOL_COUNT)
     private val errorHandler = CoroutineExceptionHandler { coroutineContext, throwable ->

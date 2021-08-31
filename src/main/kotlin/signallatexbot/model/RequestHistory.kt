@@ -15,7 +15,7 @@ import java.util.TreeSet
 
 @Serializable
 class RequestHistory private constructor(
-    val identifier: BotIdentifier,
+    val identifier: UserIdentifier,
     @SerialName("history")
     @Serializable(TreeSetSerializer::class)
     private val _history: TreeSet<Entry> = sortedSetOf(),
@@ -156,7 +156,7 @@ class RequestHistory private constructor(
          * @throws java.io.IOException
          * @throws SerializationException
          */
-        fun readFromFile(identifier: BotIdentifier): RequestHistory {
+        fun readFromFile(identifier: UserIdentifier): RequestHistory {
             val historyFile = File(requestHistoryRootDir, identifier.value)
             return if (!historyFile.exists()) {
                 RequestHistory(identifier, TreeSet(), TreeSet())
@@ -166,7 +166,7 @@ class RequestHistory private constructor(
         }
     }
 
-    class Builder(private val identifier: BotIdentifier) {
+    class Builder(private val identifier: UserIdentifier) {
         constructor(requestHistory: RequestHistory) : this(requestHistory.identifier) {
             @Suppress("UNCHECKED_CAST")
             this.history = requestHistory._history.clone() as TreeSet<Entry>
