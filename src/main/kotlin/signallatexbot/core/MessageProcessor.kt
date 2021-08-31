@@ -113,13 +113,17 @@ class MessageProcessor(
                 while (isActive) {
                     identifierMutexesMutex.withLock {
                         val iterator = identifierMutexes.iterator()
+                        var anyRemoved = false
                         for ((id, mutex) in iterator) {
                             if (!mutex.isLocked) {
                                 iterator.remove()
+                                anyRemoved = true
                                 println("removed unused mutex for $id")
                             }
                         }
-                        println("identifierMutexes size is now ${identifierMutexes.size}")
+                        if (anyRemoved) {
+                            println("identifierMutexes size is now ${identifierMutexes.size}")
+                        }
                     }
 
                     delay(TimeUnit.MINUTES.toMillis(2L))
