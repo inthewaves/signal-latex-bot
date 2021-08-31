@@ -18,7 +18,7 @@ echo
 
 ssh "$remote" rm -rf $target
 rsync -rpcv --chmod=D755,F644 --delete $output_dist_dir/lib "$remote:$target"
-# rsync -rpcv --chmod=D755,F755 --delete $output_dist_dir/bin $remote:$target
+rsync -rpcv --chmod=D755,F755 --delete $output_dist_dir/bin "$remote:$target"
 ssh "$remote" sync -f $target
 ssh "$remote" sync .
 ssh "$remote" systemctl daemon-reload
