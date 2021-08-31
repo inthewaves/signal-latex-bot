@@ -54,6 +54,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
+import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
@@ -469,6 +470,7 @@ class MessageProcessor(
                                 errorMessage = errorMsg
                             )
                         )
+                        if (e is CancellationException) throw e
                         return@withLock
                     }
 
