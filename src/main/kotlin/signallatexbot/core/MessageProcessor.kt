@@ -218,13 +218,13 @@ class MessageProcessor(
     private val lastTrustAllAttemptTimestamp = AtomicLong(0L)
     private val trustAllMutex = Mutex()
 
-    private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = coroutineScope {
+    private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = supervisorScope {
         trustAllMutex.withLock {
             if (bypassTimeCheck) {
                 val now = System.currentTimeMillis()
                 if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
                     println("Not trusting identity keys --- too early")
-                    return@coroutineScope
+                    return@supervisorScope
                 }
                 lastTrustAllAttemptTimestamp.set(now)
             }
@@ -238,7 +238,6 @@ class MessageProcessor(
                 .forEach { identityKeyList ->
                     launch {
                         val address = identityKeyList.address!!
-                        val identifier = addressToIdentifierCache.get(address)
                         identityKeyList.identities.asSequence()
                             .filter { it.trustLevel == "UNTRUSTED" }
                             .map { identityKey ->
@@ -250,16 +249,14 @@ class MessageProcessor(
                                 try {
                                     trustCallMutex.withLock {
                                         runInterruptible {
-                                            signal.trust(
-                                                address,
-                                                fingerprint,
-                                                TrustLevel.TRUSTED_UNVERIFIED
-                                            )
+                                            signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED)
                                         }
-                                        println("trusted an identity key for $identifier")
+                                        println("trusted an identity key for ${addressToIdentifierCache.get(address)}")
                                     }
                                 } catch (e: SignaldException) {
-                                    System.err.println("unable to trust an identity key for $identifier")
+                                    System.err.println(
+                                        "unable to trust an identity key for ${addressToIdentifierCache.get(address)}"
+                                    )
                                 }
                             }
                     }
