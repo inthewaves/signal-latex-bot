@@ -17,14 +17,18 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import org.inthewaves.kotlinsignald.Fingerprint
 import org.inthewaves.kotlinsignald.Recipient
 import org.inthewaves.kotlinsignald.Signal
+import org.inthewaves.kotlinsignald.TrustLevel
+import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import org.inthewaves.kotlinsignald.clientprotocol.v0.structures.JsonAttachment
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.RemoteDelete
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
 import org.scilab.forge.jlatexmath.TeXConstants
@@ -33,7 +37,7 @@ import signallatexbot.latexGenerationThreadGroup
 import signallatexbot.model.BotIdentifier
 import signallatexbot.model.RequestHistory
 import signallatexbot.model.RequestId
-import signallatexbot.util.LimitedLinkedHashMap
+import signallatexbot.util.AddressIdentifierCache
 import signallatexbot.util.addPosixPermissions
 import java.awt.AlphaComposite
 import java.awt.Color
@@ -43,6 +47,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import java.util.concurrent.Executors
@@ -56,7 +61,6 @@ import kotlin.math.roundToLong
 import kotlin.random.Random
 import kotlin.random.asKotlinRandom
 import kotlin.random.nextLong
-import kotlin.system.measureTimeMillis
 
 private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
@@ -90,15 +94,16 @@ class MessageProcessor(
     }
 
     private val latexGenerationSemaphore = Semaphore(permits = MAX_CONCURRENT_LATEX_GENERATION)
-    private val identifierMutexes = hashMapOf<BotIdentifier, Mutex>()
+
     private val identifierMutexesMutex = Mutex()
+    private val identifierMutexes = hashMapOf<BotIdentifier, Mutex>()
 
     private val executor = Executors.newFixedThreadPool(EXECUTOR_FIXED_THREAD_POOL_COUNT)
     private val errorHandler = CoroutineExceptionHandler { coroutineContext, throwable ->
         System.err.println("Error occurred when processing incoming messages: ${throwable.stackTraceToString()}")
     }
 
-    private val addressToIdentifierCache = LimitedLinkedHashMap<String, BotIdentifier>(1000)
+    private val addressToIdentifierCache = AddressIdentifierCache(identifierHashSalt = identifierHashSalt)
 
     private val processorScope = CoroutineScope(executor.asCoroutineDispatcher() + errorHandler)
 
@@ -111,12 +116,10 @@ class MessageProcessor(
                         for ((id, mutex) in iterator) {
                             if (!mutex.isLocked) {
                                 iterator.remove()
-                                println(
-                                    "removed unused mutex for $id. " +
-                                            "identifierMutexes size is now ${identifierMutexes.size}"
-                                )
+                                println("removed unused mutex for $id")
                             }
                         }
+                        println("identifierMutexes size is now ${identifierMutexes.size}")
                     }
 
                     delay(TimeUnit.MINUTES.toMillis(2L))
@@ -212,13 +215,7 @@ class MessageProcessor(
             return
         }
 
-        val identifier = addressToIdentifierCache
-            .getOrPut(BotIdentifier.getIdentifierToUse(source)) {
-                val result: BotIdentifier
-                val time = measureTimeMillis { result = BotIdentifier.create(source, identifierHashSalt) }
-                println("generated hashed identifier in $time ms for $result due to cache miss")
-                result
-            }
+        val identifierDeferred = async { addressToIdentifierCache.get(source) }
 
         launch {
             try {
@@ -233,6 +230,8 @@ class MessageProcessor(
         }
 
         launch {
+            val identifier = identifierDeferred.await()
+
             val userMutex = identifierMutexesMutex.withLock {
                 identifierMutexes.getOrPut(identifier) { Mutex() }
             }
@@ -586,16 +585,17 @@ class MessageProcessor(
     private val sendSemaphore = Semaphore(permits = MAX_CONCURRENT_MSG_SENDS)
 
     private suspend fun sendMessage(reply: Reply): Unit = sendSemaphore.withPermit {
-        val originalMsgData: IncomingMessage.Data = reply.originalMessage.data
-        println("replying to request ${reply.requestId} after a ${reply.delay} ms delay")
-        delay(reply.delay)
-        runInterruptible {
-            fun handleError(errorReply: Reply.ErrorReply) {
+        try {
+            val originalMsgData: IncomingMessage.Data = reply.originalMessage.data
+            println("replying to request ${reply.requestId} after a ${reply.delay} ms delay")
+            delay(reply.delay)
+
+            fun sendErrorMessage(errorReply: Reply.ErrorReply): SendResponse {
                 println(
                     "sending LaTeX request failure for ${errorReply.requestId}; " +
                             "Failure message: [${errorReply.errorMessage}]"
                 )
-                signal.send(
+                return signal.send(
                     recipient = errorReply.replyRecipient,
                     messageBody = errorReply.errorMessage,
                     quote = JsonQuote(
@@ -608,11 +608,11 @@ class MessageProcessor(
                 )
             }
 
-            when (reply) {
-                is Reply.Error -> handleError(reply)
-                is Reply.TryAgainMessage -> handleError(reply)
-                is Reply.LatexReply -> {
-                    try {
+            suspend fun sendMessage() = runInterruptible {
+                when (reply) {
+                    is Reply.Error -> sendErrorMessage(reply)
+                    is Reply.TryAgainMessage -> sendErrorMessage(reply)
+                    is Reply.LatexReply -> {
                         signal.send(
                             recipient = reply.replyRecipient,
                             messageBody = "",
@@ -625,9 +625,85 @@ class MessageProcessor(
                             ),
                             timestamp = reply.replyTimestamp
                         )
-                    } finally {
-                        Files.deleteIfExists(Path.of(reply.latexImagePath))
                     }
+                }
+            }
+
+            val sendResponse: SendResponse = sendMessage()
+
+            fun getResultString(sendResponse: SendResponse, isRetry: Boolean): String {
+                val successes = sendResponse.results.count { it.success != null }
+                return if (sendResponse.results.size == 1) {
+                    if (successes == 1) {
+                        "successfully handled LaTeX request ${reply.requestId}"
+                    } else {
+                        val failure = sendResponse.results.single()
+                        "failed to send LaTeX request ${reply.requestId}: " +
+                                "unregistered=${failure.unregisteredFailure}, " +
+                                "networkFailure=${failure.networkFailure}, " +
+                                "identityFailure=${failure.identityFailure != null}"
+                    }
+                } else {
+                    if (successes == sendResponse.results.size) {
+                        "successfully handled LaTeX request ${reply.requestId} to a group"
+                    } else {
+                        "partially sent LaTeX request ${reply.requestId} ($successes / ${sendResponse.results} messages)"
+                    }
+                }.let { if (isRetry) "$it (retry)" else it }
+            }
+
+            val successes = sendResponse.results.count { it.success != null }
+            println(getResultString(sendResponse, isRetry = false))
+            if (successes != sendResponse.results.size) {
+                println("Attempting to handle identity failures (safety number changes)")
+                var identityFailuresHandled = 0L
+                sendResponse.results.asSequence()
+                    .filter { sendResult ->
+                        val isValidAddress = sendResult.address?.uuid != null || sendResult.address?.number != null
+                        sendResult.identityFailure != null && isValidAddress
+                    }
+                    .forEach { failedIdentityResult ->
+                        val address = failedIdentityResult.address!!
+                        val identifier = addressToIdentifierCache.get(address)
+                        println("trusting identities for $identifier")
+
+                        val identities = try {
+                            runInterruptible { signal.getIdentities(address).identities }
+                        } catch (e: SignaldException) {
+                            System.err.println("failed to get identities for address: ${e.stackTraceToString()}")
+                            return@forEach
+                        }
+
+                        identities.asSequence()
+                            .filter {
+                                it.trustLevel == "UNTRUSTED" && (it.safetyNumber != null || it.qrCodeData != null)
+                            }
+                            .map { identityKey ->
+                                identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
+                                    ?: identityKey.qrCodeData!!.let { Fingerprint.QrCodeData(it) }
+                            }
+                            .forEach { fingerprint ->
+                                try {
+                                    runInterruptible { signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED) }
+                                    println("Trusted new identity key for $identifier")
+                                    identityFailuresHandled++
+                                } catch (e: SignaldException) {
+                                    System.err.println("Failed to trust $identifier: ${e.stackTraceToString()}")
+                                }
+                            }
+                    }
+                if (reply.replyRecipient !is Recipient.Group && identityFailuresHandled > 0L) {
+                    println("retrying message after new identity keys trusted")
+                    val retrySendResponse = sendMessage()
+                    println(getResultString(retrySendResponse, isRetry = true))
+                }
+            }
+        } finally {
+            if (reply is Reply.LatexReply) {
+                try {
+                    Files.deleteIfExists(Paths.get(reply.latexImagePath))
+                } catch (e: IOException) {
+                    System.err.println("failed to delete image for request ${reply.requestId}")
                 }
             }
         }
