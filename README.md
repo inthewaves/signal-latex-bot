@@ -17,7 +17,7 @@ DEPLOY_REMOTE=root@<IP or hostname of server to host the bot>
 As root on a server, run the following:
 
 ```bash
-# Run these three lines if you haven't install signald already.
+# Run these three lines if you haven't installed signald already.
 echo "deb https://updates.signald.org unstable main" > /etc/apt/sources.list.d/signald.list
 curl https://updates.signald.org/apt-signing-key.asc | apt-key add -
 apt update && apt install -y signald
