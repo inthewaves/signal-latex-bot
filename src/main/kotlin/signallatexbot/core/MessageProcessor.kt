@@ -2,8 +2,9 @@ package signallatexbot.core
 
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -53,7 +54,6 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
@@ -72,7 +72,6 @@ private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
 private const val LATEX_GENERATION_TIMEOUT_MILLIS = 2000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
-private const val EXECUTOR_FIXED_THREAD_POOL_COUNT = MAX_CONCURRENT_LATEX_GENERATION + 2
 private const val MAX_HISTORY_LIFETIME_DAYS = 10L
 
 class MessageProcessor(
@@ -103,14 +102,13 @@ class MessageProcessor(
     private val identifierMutexesMutex = Mutex()
     private val identifierMutexes = hashMapOf<UserIdentifier, Mutex>()
 
-    private val executor = Executors.newFixedThreadPool(EXECUTOR_FIXED_THREAD_POOL_COUNT)
     private val errorHandler = CoroutineExceptionHandler { coroutineContext, throwable ->
         System.err.println("Error occurred when processing incoming messages: ${throwable.stackTraceToString()}")
     }
 
     private val addressToIdentifierCache = AddressIdentifierCache(identifierHashSalt = identifierHashSalt)
 
-    private val processorScope = CoroutineScope(executor.asCoroutineDispatcher() + errorHandler)
+    private val processorScope = CoroutineScope(Dispatchers.IO + errorHandler)
 
     private suspend fun pruneHistory() {
         println("pruning history")
@@ -358,13 +356,12 @@ class MessageProcessor(
                 when (msgType) {
                     is IncomingMessageType.InvalidMessage -> return@withLock
                     is IncomingMessageType.RemoteDeleteMessage -> {
-                        sendReadReceipt(source, msgId)
+                        sendReadReceiptAndTyping(replyRecipient, source, msgId)
                         val targetTimestamp = msgType.remoteDelete.targetSentTimestamp
                         println(
                             "handling remote delete message from ${identifier.value.take(10)}, " +
                                     "targetTimestamp: $targetTimestamp"
                         )
-                        delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
                         val historyEntryOfTarget = existingHistoryForUser.history
                             .asSequence<RequestHistory.BaseEntry>()
                             .plus(existingHistoryForUser.timedOut)
@@ -384,17 +381,6 @@ class MessageProcessor(
                         return@withLock
                     }
                     is IncomingMessageType.LatexRequestMessage -> latexBodyInput = msgType.latexText
-                }
-
-                launch {
-                    delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
-                    try {
-                        runInterruptible {
-                            signal.typing(replyRecipient, isTyping = true)
-                        }
-                    } catch (e: IOException) {
-                        System.err.println("failed to send typing indicator: ${e.stackTraceToString()}")
-                    }
                 }
 
                 val newHistoryEntry = RequestHistory.Entry(
@@ -427,7 +413,7 @@ class MessageProcessor(
                                     println(
                                         "blocking request $requestId (${rateLimitStatus.reason}) and sending a try again"
                                     )
-                                    sendReadReceipt(source, msgId)
+                                    sendReadReceiptAndTyping(replyRecipient, source, msgId)
                                     sendMessage(
                                         Reply.TryAgainMessage(
                                             requestId = requestId,
@@ -445,7 +431,7 @@ class MessageProcessor(
                             return@launch
                         }
                         is RateLimitStatus.SendDelayed -> {
-                            sendReadReceipt(source, msgId)
+                            sendReadReceiptAndTyping(replyRecipient, source, msgId)
                             sendDelay = rateLimitStatus.sendDelay
                         }
                     }
@@ -523,17 +509,17 @@ class MessageProcessor(
         }
     }
 
-    private fun CoroutineScope.sendReadReceipt(source: JsonAddress, msgId: Long) {
-        launch {
-            try {
-                sendSemaphore.withPermit {
-                    runInterruptible {
-                        signal.markRead(source, listOf(msgId))
-                    }
-                }
-            } catch (e: IOException) {
-                System.err.println("failed to send read receipt: ${e.stackTraceToString()}")
+    private suspend fun sendReadReceiptAndTyping(replyRecipient: Recipient, source: JsonAddress, msgId: Long) {
+        try {
+            sendSemaphore.withPermit {
+                runInterruptible { signal.markRead(source, listOf(msgId)) }
             }
+            delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
+            sendSemaphore.withPermit {
+                runInterruptible { signal.typing(replyRecipient, isTyping = true) }
+            }
+        } catch (e: SignaldException) {
+            System.err.println("failed to send read receipt / typing indicator: ${e.stackTraceToString()}")
         }
     }
 
@@ -847,7 +833,7 @@ class MessageProcessor(
     }
 
     override fun close() {
-        executor.shutdown()
+        processorScope.cancel("close() was called")
     }
 }
 
