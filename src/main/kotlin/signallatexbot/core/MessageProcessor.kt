@@ -27,6 +27,7 @@ import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import org.inthewaves.kotlinsignald.clientprotocol.v0.structures.JsonAttachment
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAddress
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.RemoteDelete
@@ -343,18 +344,6 @@ class MessageProcessor(
         val identifierDeferred = async { addressToIdentifierCache.get(source) }
 
         launch {
-            try {
-                sendSemaphore.withPermit {
-                    runInterruptible {
-                        signal.markRead(source, listOf(msgId))
-                    }
-                }
-            } catch (e: IOException) {
-                System.err.println("failed to send read receipt: ${e.stackTraceToString()}")
-            }
-        }
-
-        launch {
             val identifier = identifierDeferred.await()
 
             // Force it so that there is only one request per user
@@ -364,9 +353,12 @@ class MessageProcessor(
 
             userMutex.withLock {
                 val existingHistoryForUser = RequestHistory.readFromFile(identifier)
-                val latexBodyInput = when (msgType) {
+
+                val latexBodyInput: String
+                when (msgType) {
                     is IncomingMessageType.InvalidMessage -> return@withLock
                     is IncomingMessageType.RemoteDeleteMessage -> {
+                        sendReadReceipt(source, msgId)
                         val targetTimestamp = msgType.remoteDelete.targetSentTimestamp
                         println(
                             "handling remote delete message from ${identifier.value.take(10)}, " +
@@ -391,9 +383,8 @@ class MessageProcessor(
                         }
                         return@withLock
                     }
-                    is IncomingMessageType.LatexRequestMessage -> msgType.latexText
+                    is IncomingMessageType.LatexRequestMessage -> latexBodyInput = msgType.latexText
                 }
-
 
                 launch {
                     delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
@@ -402,9 +393,7 @@ class MessageProcessor(
                             signal.typing(replyRecipient, isTyping = true)
                         }
                     } catch (e: IOException) {
-                        System.err.println(
-                            "failed to send typing indicator: ${e.stackTraceToString()}"
-                        )
+                        System.err.println("failed to send typing indicator: ${e.stackTraceToString()}")
                     }
                 }
 
@@ -438,6 +427,7 @@ class MessageProcessor(
                                     println(
                                         "blocking request $requestId (${rateLimitStatus.reason}) and sending a try again"
                                     )
+                                    sendReadReceipt(source, msgId)
                                     sendMessage(
                                         Reply.TryAgainMessage(
                                             requestId = requestId,
@@ -455,6 +445,7 @@ class MessageProcessor(
                             return@launch
                         }
                         is RateLimitStatus.SendDelayed -> {
+                            sendReadReceipt(source, msgId)
                             sendDelay = rateLimitStatus.sendDelay
                         }
                     }
@@ -528,6 +519,20 @@ class MessageProcessor(
                     }
                     newHistoryBuilder.build().writeToDisk()
                 }
+            }
+        }
+    }
+
+    private fun CoroutineScope.sendReadReceipt(source: JsonAddress, msgId: Long) {
+        launch {
+            try {
+                sendSemaphore.withPermit {
+                    runInterruptible {
+                        signal.markRead(source, listOf(msgId))
+                    }
+                }
+            } catch (e: IOException) {
+                System.err.println("failed to send read receipt: ${e.stackTraceToString()}")
             }
         }
     }
