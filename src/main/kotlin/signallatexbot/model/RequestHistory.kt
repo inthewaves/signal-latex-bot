@@ -1,9 +1,10 @@
 package signallatexbot.model
 
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
-import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
 import signallatexbot.core.BotConfig
 import signallatexbot.model.RequestHistory.Companion.MAX_HISTORY_SIZE
@@ -14,6 +15,7 @@ import java.io.IOException
 import java.util.Collections
 import java.util.SortedSet
 import java.util.TreeSet
+import java.util.concurrent.TimeUnit
 
 /**
  * Encapsulates the LaTeX request history file for one Signal user. Users are identified by their [UserIdentifier],
@@ -35,17 +37,16 @@ class RequestHistory private constructor(
     @Serializable(TreeSetSerializer::class)
     private val _history: TreeSet<Entry> = sortedSetOf(),
     /**
-     * The set of requests that took too long to complete.
+     * The set of requests that took too long to complete. The intersection with this set and [_history] should
+     * be empty.
      */
     @SerialName("timedOut")
     @Serializable(TreeSetSerializer::class)
     private val _timedOutRequests: TreeSet<TimedOutEntry> = sortedSetOf()
 ) {
-    @Transient
-    val history: SortedSet<Entry> = Collections.unmodifiableSortedSet(_history)
+    val history: SortedSet<Entry> by lazy { Collections.unmodifiableSortedSet(_history) }
 
-    @Transient
-    val timedOut: SortedSet<TimedOutEntry> = Collections.unmodifiableSortedSet(_timedOutRequests)
+    val timedOut: SortedSet<TimedOutEntry> by lazy { Collections.unmodifiableSortedSet(_timedOutRequests) }
 
     sealed interface BaseEntry : Comparable<BaseEntry> {
         /**
@@ -197,6 +198,17 @@ class RequestHistory private constructor(
         }
         private var history: TreeSet<Entry> = sortedSetOf()
         private var timedOutRequests: TreeSet<TimedOutEntry> = sortedSetOf()
+
+        suspend fun removeEntriesOlderThan(durationAgo: Long, timeUnit: TimeUnit): Builder = coroutineScope {
+            val timestamp = System.currentTimeMillis() - timeUnit.toMillis(durationAgo)
+            launch {
+                history.removeIf { it.serverReceiveTime < timestamp }
+            }
+            launch {
+                timedOutRequests.removeIf { it.serverReceiveTime < timestamp }
+            }
+            this@Builder
+        }
 
         fun addHistoryEntry(entry: Entry): Builder {
             if (history.size >= MAX_HISTORY_SIZE) {

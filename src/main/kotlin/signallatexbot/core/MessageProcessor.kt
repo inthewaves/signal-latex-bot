@@ -17,6 +17,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
 import org.inthewaves.kotlinsignald.Fingerprint
 import org.inthewaves.kotlinsignald.Recipient
 import org.inthewaves.kotlinsignald.Signal
@@ -52,6 +54,7 @@ import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
 import javax.swing.JLabel
 import kotlin.coroutines.resume
@@ -69,6 +72,7 @@ private const val LATEX_GENERATION_TIMEOUT_MILLIS = 2000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val EXECUTOR_FIXED_THREAD_POOL_COUNT = MAX_CONCURRENT_LATEX_GENERATION + 2
+private const val MAX_HISTORY_LIFETIME_DAYS = 10L
 
 class MessageProcessor(
     private val signal: Signal,
@@ -107,8 +111,46 @@ class MessageProcessor(
 
     private val processorScope = CoroutineScope(executor.asCoroutineDispatcher() + errorHandler)
 
+    private suspend fun pruneHistory() {
+        println("pruning history")
+        val requestHistoryFiles = RequestHistory.requestHistoryRootDir.listFiles() ?: return
+        val prunedCount = AtomicLong(0)
+        coroutineScope {
+            requestHistoryFiles.asSequence()
+                .map {
+                    try {
+                        Json.decodeFromString(RequestHistory.serializer(), it.readText())
+                    } catch (e: IOException) {
+                        System.err.println("failed to read ${it.absolutePath}: ${e.stackTraceToString()}")
+                        null
+                    } catch (e: SerializationException) {
+                        System.err.println("failed to read ${it.absolutePath}: ${e.stackTraceToString()}")
+                        null
+                    }
+                }
+                .filterNotNull()
+                .forEach { oldHistory ->
+                    launch {
+                        val newHistory = oldHistory.toBuilder()
+                            .removeEntriesOlderThan(MAX_HISTORY_LIFETIME_DAYS, TimeUnit.DAYS)
+                            .build()
+
+                        if (newHistory != oldHistory) {
+                            val entriesRemoved = (oldHistory.history.size - newHistory.history.size) +
+                                    (oldHistory.timedOut.size - newHistory.timedOut.size)
+                            prunedCount.addAndGet(entriesRemoved.toLong())
+                        }
+
+                        newHistory.writeToDisk()
+                    }
+                }
+        }
+        println("pruned ${prunedCount.get()} history entries")
+    }
+
     suspend fun runProcessor() {
         val mainJob = processorScope.launch {
+            pruneHistory()
             launch {
                 while (isActive) {
                     identifierMutexesMutex.withLock {
@@ -292,7 +334,8 @@ class MessageProcessor(
                     replyMessageTimestamp = System.currentTimeMillis(),
                 )
 
-                val newHistoryBuilder = existingHistoryForUser.toBuilder().addHistoryEntry(newHistoryEntry)
+                var timedOut = false
+                val newHistoryBuilder = existingHistoryForUser.toBuilder()
                 try {
                     val requestId = RequestId.create(identifier)
                     println("received LaTeX request $requestId")
@@ -374,7 +417,7 @@ class MessageProcessor(
 
                     if (latexImagePath == null) {
                         System.err.println("LaTeX request $requestId timed out")
-                        newHistoryBuilder.addTimedOutEntry(newHistoryEntry.toTimedOutEntry(botConfig, latexBodyInput))
+                        timedOut = true
                         sendMessage(
                             Reply.Error(
                                 requestId = requestId,
@@ -398,6 +441,11 @@ class MessageProcessor(
                         )
                     }
                 } finally {
+                    if (timedOut) {
+                        newHistoryBuilder.addTimedOutEntry(newHistoryEntry.toTimedOutEntry(botConfig, latexBodyInput))
+                    } else {
+                        newHistoryBuilder.addHistoryEntry(newHistoryEntry)
+                    }
                     newHistoryBuilder.build().writeToDisk()
                 }
             }
