@@ -252,21 +252,26 @@ class MessageProcessor(
                                 "handling remote delete message from ${identifier.value.take(10)}, " +
                                         "target: $historyEntryOfTarget"
                             )
+                            delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
                             sendSemaphore.withPermit {
                                 runInterruptible {
                                     signal.remoteDelete(replyRecipient, historyEntryOfTarget.replyMessageTimestamp)
                                 }
                             }
                         } else {
-                            println("unable to time ${identifier.value.take(10)}")
+                            println(
+                                "unable to handle remote delete message from ${identifier.value.take(10)}, " +
+                                        "target: $historyEntryOfTarget. can't find the history entry"
+                            )
                         }
                         return@withLock
                     }
                     is IncomingMessageType.LatexRequestMessage -> msgType.latexText
                 }
 
-                delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
+
                 launch {
+                    delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
                     try {
                         runInterruptible {
                             signal.typing(replyRecipient, isTyping = true)
