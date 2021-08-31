@@ -1,8 +1,11 @@
 # Signal LaTeX bot
 
-A Signal bot that replies to incoming messages with LaTeX PNGs.
+A Signal bot that replies to incoming messages with LaTeX PNGs via
+[JLaTeXMath](https://github.com/opencollab/jlatexmath).
 
 Try it out by messaging +14046091473 on Signal.
+
+![An example of the LaTeX bot output](./images/latexbotexample.png)
 
 ### Installation
 
