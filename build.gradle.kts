@@ -20,6 +20,7 @@ dependencies {
     implementation("org.bouncycastle:bcpkix-jdk15on:1.69")
     implementation("org.scilab.forge:jlatexmath:1.0.7")
     implementation("com.github.ajalt.clikt:clikt:3.2.0")
+    implementation("com.google.crypto.tink:tink:1.6.1")
     testImplementation(kotlin("test"))
 }
 
