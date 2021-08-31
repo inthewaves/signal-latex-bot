@@ -168,7 +168,7 @@ class MessageProcessor(
                         }
                     }
 
-                    delay(TimeUnit.MINUTES.toMillis(2L))
+                    delay(TimeUnit.MINUTES.toMillis(10L))
                 }
             }
 
@@ -229,13 +229,23 @@ class MessageProcessor(
 
         val source = message.data.source?.takeUnless { it.uuid == null || it.number == null }
         if (source == null) {
-            println("received a message without a UUID or a number")
+            println("received a message without a UUID or a number as the source")
+            return
+        }
+
+        if (source.uuid == signal.accountInfo?.address?.uuid || source.number == signal.accountInfo?.address?.number) {
+            println("received a message to self")
             return
         }
 
         val isGroupV1Message = message.data.dataMessage?.group != null
         if (isGroupV1Message) {
             println("received a legacy group message, which we don't send to")
+            return
+        }
+
+        if (message.data.dataMessage?.endSession == true) {
+            println("received an end session message")
             return
         }
 
@@ -278,6 +288,7 @@ class MessageProcessor(
         launch {
             val identifier = identifierDeferred.await()
 
+            // Force it so that there is only one request per user
             val userMutex = identifierMutexesMutex.withLock {
                 identifierMutexes.getOrPut(identifier) { Mutex() }
             }
