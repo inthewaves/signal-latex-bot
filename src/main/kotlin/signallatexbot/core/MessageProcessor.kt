@@ -151,6 +151,7 @@ class MessageProcessor(
     suspend fun runProcessor() {
         val mainJob = processorScope.launch {
             pruneHistory()
+            trustAllUntrustedIdentityKeys(bypassTimeCheck = true)
             launch {
                 while (isActive) {
                     identifierMutexesMutex.withLock {
@@ -217,14 +218,16 @@ class MessageProcessor(
     private val lastTrustAllAttemptTimestamp = AtomicLong(0L)
     private val trustAllMutex = Mutex()
 
-    private suspend fun trustAllUntrustedIdentityKeys() {
+    private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false) {
         trustAllMutex.withLock {
-            val now = System.currentTimeMillis()
-            if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
-                println("Not trusting identity keys --- too early")
-                return
+            if (bypassTimeCheck) {
+                val now = System.currentTimeMillis()
+                if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
+                    println("Not trusting identity keys --- too early")
+                    return
+                }
+                lastTrustAllAttemptTimestamp.set(now)
             }
-            lastTrustAllAttemptTimestamp.set(now)
 
             println("Trusting all untrusted identity keys")
             runInterruptible { signal.getAllIdentities() }
