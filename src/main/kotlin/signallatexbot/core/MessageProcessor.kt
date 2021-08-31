@@ -288,15 +288,15 @@ class MessageProcessor(
                     is IncomingMessageType.InvalidMessage -> return@withLock
                     is IncomingMessageType.RemoteDeleteMessage -> {
                         val targetTimestamp = msgType.remoteDelete.targetSentTimestamp
+                        println(
+                            "handling remote delete message from ${identifier.value.take(10)}, " +
+                                    "targetTimestamp: $targetTimestamp"
+                        )
                         val historyEntryOfTarget = existingHistoryForUser.history
                             .asSequence<RequestHistory.BaseEntry>()
                             .plus(existingHistoryForUser.timedOut)
                             .find { it.clientSentTimestamp == targetTimestamp }
                         if (historyEntryOfTarget != null) {
-                            println(
-                                "handling remote delete message from ${identifier.value.take(10)}, " +
-                                        "target: $historyEntryOfTarget"
-                            )
                             delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
                             sendSemaphore.withPermit {
                                 runInterruptible {
@@ -306,7 +306,7 @@ class MessageProcessor(
                         } else {
                             println(
                                 "unable to handle remote delete message from ${identifier.value.take(10)}, " +
-                                        "target: $historyEntryOfTarget. can't find the history entry"
+                                        "targetTimestamp: $targetTimestamp. can't find the history entry"
                             )
                         }
                         return@withLock
