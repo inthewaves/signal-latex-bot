@@ -66,7 +66,11 @@ private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val EXECUTOR_FIXED_THREAD_POOL_COUNT = MAX_CONCURRENT_LATEX_GENERATION + 2
 
-class MessageProcessor(private val signal: Signal, private val outputPhotoDir: File) : AutoCloseable {
+class MessageProcessor(
+    private val signal: Signal,
+    private val outputPhotoDir: File,
+    private val botConfig: BotConfig
+) : AutoCloseable {
     private val botUuid = signal.accountInfo?.address?.uuid ?: error("bot doesn't have UUID")
 
     private val secureRandom = SecureRandom()
@@ -361,8 +365,8 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
                     }
 
                     if (latexImagePath == null) {
-                        newHistoryBuilder.addTimedOutEntry(newHistoryEntry.toTimedOutEntry(latexBodyInput))
-
+                        System.err.println("LaTeX request $requestId timed out")
+                        newHistoryBuilder.addTimedOutEntry(newHistoryEntry.toTimedOutEntry(botConfig, latexBodyInput))
                         sendMessage(
                             Reply.Error(
                                 requestId = requestId,
@@ -578,7 +582,7 @@ class MessageProcessor(private val signal: Signal, private val outputPhotoDir: F
 
     private suspend fun sendMessage(reply: Reply): Unit = sendSemaphore.withPermit {
         val originalMsgData: IncomingMessage.Data = reply.originalMessage.data
-        println("sending LaTeX request for ${reply.requestId} after a ${reply.delay} ms delay")
+        println("replying to request ${reply.requestId} after a ${reply.delay} ms delay")
         delay(reply.delay)
         runInterruptible {
             fun handleError(errorReply: Reply.ErrorReply) {

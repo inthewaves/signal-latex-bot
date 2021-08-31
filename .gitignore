@@ -2,3 +2,4 @@
 /.idea/
 /.gradle/
 .env
+private-keyset.json

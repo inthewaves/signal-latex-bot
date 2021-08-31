@@ -4,11 +4,9 @@ set -o errexit
 
 source .env
 
-./gradlew clean build distTar
+./gradlew clean build installDist
 
-output_dist_dir=build/distributions/signal-latex-bot
-
-tar -xf build/distributions/*.tar --one-top-level=$output_dist_dir --strip-components 1
+output_dist_dir=build/install/signal-latex-bot
 
 remote="$DEPLOY_REMOTE"
 path=/opt/signallatexbot

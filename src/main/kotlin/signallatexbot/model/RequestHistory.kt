@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
+import signallatexbot.core.BotConfig
 import signallatexbot.serialization.TreeSetSerializer
 import java.io.File
 import java.io.IOException
@@ -55,11 +56,11 @@ class RequestHistory private constructor(
         override val serverReceiveTime: Long,
         override val replyMessageTimestamp: Long
     ) : BaseEntry {
-        fun toTimedOutEntry(latex: String) = TimedOutEntry(
+        fun toTimedOutEntry(botConfig: BotConfig, plaintextLatex: String) = TimedOutEntry(
             clientSentTimestamp,
             serverReceiveTime,
             replyMessageTimestamp,
-            Base64String.create(latex.encodeToByteArray())
+            HybridEncryptCiphertext.fromPlaintext(botConfig, plaintextLatex)
         )
     }
 
@@ -68,7 +69,7 @@ class RequestHistory private constructor(
         override val clientSentTimestamp: Long,
         override val serverReceiveTime: Long,
         override val replyMessageTimestamp: Long,
-        val latex: Base64String
+        val latex: HybridEncryptCiphertext
     ) : BaseEntry
 
     val mostRecentEntry: Entry? = try {
@@ -149,7 +150,7 @@ class RequestHistory private constructor(
         private const val MAX_HISTORY_SIZE = 100
         private const val MAX_TIMEOUT_HISTORY_SIZE = 100
 
-        private val requestHistoryRootDir = File("history")
+        val requestHistoryRootDir = File("history")
 
         /**
          * @throws java.io.IOException
