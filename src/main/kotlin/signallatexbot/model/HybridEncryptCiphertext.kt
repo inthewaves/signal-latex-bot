@@ -11,8 +11,8 @@ value class HybridEncryptCiphertext private constructor(val ciphertext: ByteArra
     /**
      * @throws java.security.GeneralSecurityException
      */
-    fun decrypt(keysetHandle: KeysetHandle, contextInfo: ByteArray = ByteArray(0)): ByteArray {
-        val hybridDecrypt = keysetHandle.getPrimitive(HybridDecrypt::class.java)
+    fun decrypt(privateKeysetHandle: KeysetHandle, contextInfo: ByteArray = ByteArray(0)): ByteArray {
+        val hybridDecrypt = privateKeysetHandle.getPrimitive(HybridDecrypt::class.java)
         return hybridDecrypt.decrypt(ciphertext, contextInfo)!!
     }
 

@@ -6,6 +6,8 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
 import signallatexbot.core.BotConfig
+import signallatexbot.model.RequestHistory.Companion.MAX_HISTORY_SIZE
+import signallatexbot.model.RequestHistory.Companion.MAX_TIMEOUT_HISTORY_SIZE
 import signallatexbot.serialization.TreeSetSerializer
 import java.io.File
 import java.io.IOException
@@ -13,12 +15,28 @@ import java.util.Collections
 import java.util.SortedSet
 import java.util.TreeSet
 
+/**
+ * Encapsulates the LaTeX request history file for one Signal user. Users are identified by their [UserIdentifier],
+ * which is a hashed identifier.
+ *
+ * The history is queried for reasons such as monitoring and reacting to remote-delete requests from clients. History
+ * records do not exceed the limits given by [MAX_HISTORY_SIZE] and [MAX_TIMEOUT_HISTORY_SIZE].
+ */
 @Serializable
 class RequestHistory private constructor(
+    /**
+     * The identifier for this history file.
+     */
     val identifier: UserIdentifier,
+    /**
+     * The set of requests that were either successful or had an error.
+     */
     @SerialName("history")
     @Serializable(TreeSetSerializer::class)
     private val _history: TreeSet<Entry> = sortedSetOf(),
+    /**
+     * The set of requests that took too long to complete.
+     */
     @SerialName("timedOut")
     @Serializable(TreeSetSerializer::class)
     private val _timedOutRequests: TreeSet<TimedOutEntry> = sortedSetOf()
@@ -69,6 +87,10 @@ class RequestHistory private constructor(
         override val clientSentTimestamp: Long,
         override val serverReceiveTime: Long,
         override val replyMessageTimestamp: Long,
+        /**
+         * The LaTeX input that took too long to generate. We keep this here for troubleshooting / monitoring reasons.
+         * We ensure that it is encrypted and that we never print user's LaTeX input to stdout / stderr.
+         */
         val latex: HybridEncryptCiphertext
     ) : BaseEntry
 
