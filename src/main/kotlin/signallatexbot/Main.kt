@@ -57,33 +57,28 @@ class BotCommand : CliktCommand(name = "signal-latex-bot") {
 
 class DecryptHistoryCommand : CliktCommand(name = "decrypt-history") {
     private val privateKeysetFile by option().file(mustBeReadable = true).required()
-    private val identifier by argument()
+    private val identifierHistoryFile by argument().file(mustBeReadable = true)
 
     override fun run() {
         val privateKeyset = CleartextKeysetHandle.read(JsonKeysetReader.withFile(privateKeysetFile))
 
-        val identifierHistory = RequestHistory.requestHistoryRootDir.listFiles()!!.asSequence()
-            .map {
-                try {
-                    Json.decodeFromString(RequestHistory.serializer(), it.readText())
-                } catch (e: SerializationException) {
-                    null
-                }
-            }
-            .filterNotNull()
-            .find { it.identifier.value == identifier }
-            ?: run {
-                System.err.println("Unable to find history for identifier $identifier")
-                exitProcess(1)
-            }
+        val identifierHistory = try {
+            Json.decodeFromString(RequestHistory.serializer(), identifierHistoryFile.readText())
+        } catch (e: SerializationException) {
+            System.err.println("unable to read history from $identifierHistoryFile: ${e.stackTraceToString()}")
+            exitProcess(1)
+        } catch (e: IOException) {
+            System.err.println("unable to read history from $identifierHistoryFile: ${e.stackTraceToString()}")
+            exitProcess(1)
+        }
 
-        println("Decrypted history for identifier $identifier")
+        println("Decrypted history for identifier ${identifierHistoryFile.name}: ")
         println(
             identifierHistory.timedOut
                 .joinToString("\n====================\n") {
                     val timeString = Instant.ofEpochMilli(it.replyMessageTimestamp).atZone(ZoneId.systemDefault())
                     "History entry with replyMessageTimestamp=${it.replyMessageTimestamp} ($timeString) has LaTeX:\n" +
-                            it.latex.decrypt(privateKeyset).decodeToString()
+                            it.latexCiphertext.decrypt(privateKeyset, identifierHistory.identifier).decodeToString()
                 }
         )
     }

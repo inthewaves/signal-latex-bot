@@ -75,11 +75,11 @@ class RequestHistory private constructor(
         override val serverReceiveTime: Long,
         override val replyMessageTimestamp: Long
     ) : BaseEntry {
-        fun toTimedOutEntry(botConfig: BotConfig, plaintextLatex: String) = TimedOutEntry(
+        fun toTimedOutEntry(botConfig: BotConfig, plaintextLatex: String, identifier: UserIdentifier) = TimedOutEntry(
             clientSentTimestamp,
             serverReceiveTime,
             replyMessageTimestamp,
-            HybridEncryptCiphertext.fromPlaintext(botConfig, plaintextLatex)
+            LatexCiphertext.fromPlaintext(botConfig, plaintextLatex, identifier)
         )
     }
 
@@ -92,7 +92,7 @@ class RequestHistory private constructor(
          * The LaTeX input that took too long to generate. We keep this here for troubleshooting / monitoring reasons.
          * We ensure that it is encrypted and that we never print user's LaTeX input to stdout / stderr.
          */
-        val latex: HybridEncryptCiphertext
+        val latexCiphertext: LatexCiphertext
     ) : BaseEntry
 
     val mostRecentEntry: Entry? = try {

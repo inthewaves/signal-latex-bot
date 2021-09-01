@@ -501,7 +501,9 @@ class MessageProcessor(
                     }
                 } finally {
                     if (timedOut) {
-                        newHistoryBuilder.addTimedOutEntry(newHistoryEntry.toTimedOutEntry(botConfig, latexBodyInput))
+                        newHistoryBuilder.addTimedOutEntry(
+                            newHistoryEntry.toTimedOutEntry(botConfig, latexBodyInput, identifier)
+                        )
                     } else {
                         newHistoryBuilder.addHistoryEntry(newHistoryEntry)
                     }
