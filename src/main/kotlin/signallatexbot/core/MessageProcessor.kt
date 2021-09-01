@@ -105,9 +105,12 @@ class MessageProcessor(
     private val identifierMutexes = hashMapOf<UserIdentifier, Mutex>()
 
     private val errorHandler = CoroutineExceptionHandler { coroutineContext, throwable ->
+        val incomingMessageType = coroutineContext[IncomingMessageType]?.let { it::class.simpleName }
         val requestId: RequestId? = coroutineContext[RequestId]
         System.err.println(
-            "Exception when processing incoming messages (requestId: $requestId): ${throwable.stackTraceToString()}"
+            "Exception when processing incoming messages " +
+                    "(requestId: $requestId, incomingMessageType: ${incomingMessageType}): " +
+                    throwable.stackTraceToString()
         )
     }
 
@@ -169,14 +172,16 @@ class MessageProcessor(
         mainJob.join()
     }
 
-    sealed interface IncomingMessageType {
+    sealed interface IncomingMessageType : CoroutineContext.Element {
         @JvmInline
         value class LatexRequestMessage(val latexText: String) : IncomingMessageType
         @JvmInline
         value class RemoteDeleteMessage(val remoteDelete: RemoteDelete) : IncomingMessageType
         object InvalidMessage : IncomingMessageType
 
-        companion object {
+        override val key: CoroutineContext.Key<IncomingMessageType> get() = Companion
+
+        companion object : CoroutineContext.Key<IncomingMessageType> {
             fun getHandleType(incomingMessage: IncomingMessage): IncomingMessageType {
                 val remoteDelete = incomingMessage.data.dataMessage?.remoteDelete
                 val body = incomingMessage.data.dataMessage?.body
@@ -342,7 +347,7 @@ class MessageProcessor(
                     is IncomingMessageType.RemoteDeleteMessage -> {
                         val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
                         if (targetTimestamp == null) {
-                            println("received remote delete request $requestId, targetTimestamp is null so rejecting")
+                            println("got remote delete request $requestId, but targetTimestamp is null so rejecting")
                             return@withLockAndContext
                         }
 
@@ -350,12 +355,16 @@ class MessageProcessor(
                         delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
                         val timestampOfOurMsgToDelete = database.requestQueries
                             .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
-                            .executeAsOne()
-                            .replyMessageTimestamp
+                            .executeAsOneOrNull()
+                            ?.replyMessageTimestamp
                         if (timestampOfOurMsgToDelete != null) {
                             sendSemaphore.withPermit {
                                 runInterruptible { signal.remoteDelete(replyRecipient, timestampOfOurMsgToDelete) }
                             }
+                            println(
+                                "handled remote delete message from $requestId, " +
+                                        "targetTimestamp: $targetTimestamp. can't find the history entry"
+                            )
                         } else {
                             println(
                                 "unable to handle remote delete message from $requestId, " +
@@ -738,7 +747,7 @@ class MessageProcessor(
     private suspend fun sendMessage(reply: Reply): Unit = sendSemaphore.withPermit {
         try {
             val originalMsgData: IncomingMessage.Data = reply.originalMessage.data
-            println("replying to request ${reply.requestId} after a ${reply.delay} ms delay")
+            println("replying to request ${reply.requestId} (${reply::class.simpleName}) after a ${reply.delay} ms delay")
             delay(reply.delay)
 
             fun sendErrorMessage(errorReply: Reply.ErrorReply): SendResponse {
@@ -843,6 +852,8 @@ class MessageProcessor(
                                 }
                             }
                     }
+
+                // don't retry sending to groups until https://gitlab.com/signald/signald/-/issues/209
                 if (reply.replyRecipient !is Recipient.Group && identityFailuresHandled > 0L) {
                     println("retrying message after new identity keys trusted")
                     val retrySendResponse = sendMessage()
