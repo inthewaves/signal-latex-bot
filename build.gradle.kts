@@ -3,7 +3,17 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 plugins {
     kotlin("jvm") version "1.5.30"
     kotlin("plugin.serialization") version "1.5.30"
+    id("com.squareup.sqldelight") version "1.5.1"
     application
+}
+
+sqldelight {
+    database("BotDatabase") { // This will be the name of the generated database class.
+        packageName = "signallatexbot.db"
+        schemaOutputDirectory = file("src/main/sqldelight/databases")
+        verifyMigrations = true
+        dialect = "sqlite:3.25"
+    }
 }
 
 group = "me.user"
@@ -21,6 +31,10 @@ dependencies {
     implementation("org.scilab.forge:jlatexmath:1.0.7")
     implementation("com.github.ajalt.clikt:clikt:3.2.0")
     implementation("com.google.crypto.tink:tink:1.6.1")
+
+    implementation("com.squareup.sqldelight:sqlite-driver:1.5.1")
+    // transitive dependency of com.squareup.sqldelight:sqlite-driver anyway, included for config options
+    implementation("org.xerial:sqlite-jdbc:3.34.0")
     testImplementation(kotlin("test"))
 }
 

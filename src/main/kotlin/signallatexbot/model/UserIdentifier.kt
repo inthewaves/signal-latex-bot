@@ -12,7 +12,7 @@ import signallatexbot.util.Hex
  */
 @Serializable
 @JvmInline
-value class UserIdentifier private constructor(val value: String) {
+value class UserIdentifier(val value: String) {
     override fun toString(): String = value
     companion object {
         fun getIdentifierToUse(address: JsonAddress) =

@@ -27,7 +27,9 @@ import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import signallatexbot.core.BotConfig
 import signallatexbot.core.JLaTeXMathGenerator
 import signallatexbot.core.MessageProcessor
-import signallatexbot.model.RequestHistory
+import signallatexbot.db.executeAsSequence
+import signallatexbot.db.withDatabase
+import signallatexbot.model.UserIdentifier
 import signallatexbot.serialization.KeysetHandlePlaintextJsonSerializer
 import signallatexbot.util.addPosixPermissions
 import signallatexbot.util.changePosixGroup
@@ -58,30 +60,30 @@ class BotCommand : CliktCommand(name = "signal-latex-bot") {
 
 class DecryptHistoryCommand : CliktCommand(name = "decrypt-history") {
     private val privateKeysetFile by option().file(mustBeReadable = true).required()
-    private val identifierHistoryFile by argument().file(mustBeReadable = true)
+    private val identifier by argument()
 
     override fun run() {
+        val userId = UserIdentifier(identifier)
         val privateKeyset = CleartextKeysetHandle.read(JsonKeysetReader.withFile(privateKeysetFile))
 
-        val identifierHistory = try {
-            Json.decodeFromString(RequestHistory.serializer(), identifierHistoryFile.readText())
-        } catch (e: SerializationException) {
-            System.err.println("unable to read history from $identifierHistoryFile: ${e.stackTraceToString()}")
-            exitProcess(1)
-        } catch (e: IOException) {
-            System.err.println("unable to read history from $identifierHistoryFile: ${e.stackTraceToString()}")
-            exitProcess(1)
+        println("Decrypted history for identifier $userId: ")
+        runBlocking {
+            withDatabase { db ->
+                db.requestQueries
+                    .getRequestsWithLatexCiphertext(userId)
+                    .executeAsSequence { sequence ->
+                        sequence.forEach {
+                            val timeString = Instant.ofEpochMilli(it.serverReceiveTimestamp)
+                                .atZone(ZoneId.systemDefault())
+                            println(
+                                "History entry with replyMessageTimestamp=${it.replyMessageTimestamp} ($timeString) " +
+                                        "has LaTeX:\n" +
+                                        it.latexCiphertext.decrypt(privateKeyset, userId).decodeToString()
+                            )
+                        }
+                    }
+            }
         }
-
-        println("Decrypted history for identifier ${identifierHistoryFile.name}: ")
-        println(
-            identifierHistory.timedOut
-                .joinToString("\n====================\n") {
-                    val timeString = Instant.ofEpochMilli(it.replyMessageTimestamp).atZone(ZoneId.systemDefault())
-                    "History entry with replyMessageTimestamp=${it.replyMessageTimestamp} ($timeString) has LaTeX:\n" +
-                            it.latexCiphertext.decrypt(privateKeyset, identifierHistory.identifier).decodeToString()
-                }
-        )
     }
 }
 
@@ -395,9 +397,16 @@ class RunCommand : BaseSignaldCommand(name = "run", help = "Runs the bot") {
 
         println("Starting bot")
         runBlocking {
-            MessageProcessor(signal, outputDirectory, botConfig, JLaTeXMathGenerator()).use { messageProcessor ->
-                messageProcessor.runProcessor()
+            withDatabase { database ->
+                MessageProcessor(
+                    signal = signal,
+                    outputPhotoDir = outputDirectory,
+                    botConfig = botConfig,
+                    latexGenerator = JLaTeXMathGenerator(),
+                    database = database
+                ).use { messageProcessor -> messageProcessor.runProcessor() }
             }
+
         }
     }
 

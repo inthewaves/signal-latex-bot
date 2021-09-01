@@ -18,8 +18,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.serialization.SerializationException
-import kotlinx.serialization.json.Json
 import org.inthewaves.kotlinsignald.Fingerprint
 import org.inthewaves.kotlinsignald.Recipient
 import org.inthewaves.kotlinsignald.Signal
@@ -35,8 +33,9 @@ import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.RemoteDelete
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
+import signallatexbot.db.BotDatabase
 import signallatexbot.latexGenerationThreadGroup
-import signallatexbot.model.RequestHistory
+import signallatexbot.model.LatexCiphertext
 import signallatexbot.model.RequestId
 import signallatexbot.model.UserIdentifier
 import signallatexbot.util.AddressIdentifierCache
@@ -68,11 +67,8 @@ private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val MAX_HISTORY_LIFETIME_DAYS = 10L
 private const val MAX_LATEX_BODY_LENGTH_CHARS = 4096
 
-private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE = 15
-private val MINUTE_MILLIS = TimeUnit.MINUTES.toMillis(1)
-
-private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4
-private val TWENTY_SECOND_MILLIS = TimeUnit.SECONDS.toMillis(20)
+private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE = 15L
+private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4L
 
 private const val MAX_EXTRA_SEND_DELAY_SECONDS = 10.0
 
@@ -81,6 +77,7 @@ class MessageProcessor(
     private val outputPhotoDir: File,
     private val botConfig: BotConfig,
     private val latexGenerator: LatexGenerator,
+    private val database: BotDatabase
 ) : AutoCloseable {
     private val botUuid = signal.accountInfo?.address?.uuid ?: error("bot doesn't have UUID")
 
@@ -109,12 +106,14 @@ class MessageProcessor(
         System.err.println("Error occurred when processing incoming messages: ${throwable.stackTraceToString()}")
     }
 
-    private val addressToIdentifierCache = AddressIdentifierCache(identifierHashSalt = identifierHashSalt)
+    private val addressToIdentifierCache =
+        AddressIdentifierCache(identifierHashSalt = identifierHashSalt, database = database)
 
     private val processorScope = CoroutineScope(Dispatchers.IO + errorHandler)
 
     private suspend fun pruneHistory() {
         println("pruning history")
+        /*
         val requestHistoryFiles = RequestHistory.requestHistoryRootDir.listFiles() ?: return
         val prunedCount = AtomicLong(0)
         coroutineScope {
@@ -148,6 +147,8 @@ class MessageProcessor(
                 }
         }
         println("pruned ${prunedCount.get()} history entries")
+
+         */
     }
 
     suspend fun runProcessor() {
@@ -342,10 +343,8 @@ class MessageProcessor(
             return
         }
 
-        val identifierDeferred = async { addressToIdentifierCache.get(source) }
-
         launch {
-            val identifier = identifierDeferred.await()
+            val identifier = addressToIdentifierCache.get(source)
 
             // Force it so that there is only one request per user
             val userMutex = identifierMutexesMutex.withLock {
@@ -353,15 +352,10 @@ class MessageProcessor(
             }
 
             userMutex.withLock {
-                val existingHistoryForUser = RequestHistory.readFromFile(identifier)
-
-                val newHistoryEntry = RequestHistory.Entry(
-                    clientSentTimestamp = msgId,
-                    serverReceiveTime = serverReceiveTimestamp,
-                    replyMessageTimestamp = System.currentTimeMillis(),
-                )
+                val replyMessageTimestamp by lazy { System.currentTimeMillis() }
 
                 var timedOut = false
+                var sentReply = true
                 try {
                     val requestId = RequestId.create(identifier)
                     when (incomingMsgType) {
@@ -374,11 +368,10 @@ class MessageProcessor(
                     }
 
                     val rateLimitStatus = RateLimitStatus.getStatus(
+                        database,
+                        requestId,
                         incomingMsgType,
                         incomingMessage,
-                        existingHistoryForUser,
-                        newHistoryEntry,
-                        requestId,
                         secureKotlinRandom
                     )
 
@@ -386,18 +379,16 @@ class MessageProcessor(
                     when (incomingMsgType) {
                         is IncomingMessageType.InvalidMessage -> error("unexpected message type")
                         is IncomingMessageType.RemoteDeleteMessage -> {
-                            if (rateLimitStatus is RateLimitStatus.SendDelayed) {
-                                val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
+                            val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
+                            if (rateLimitStatus is RateLimitStatus.SendDelayed && targetTimestamp != null) {
                                 delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
-                                val historyEntryOfTarget = existingHistoryForUser.history
-                                    .asSequence<RequestHistory.BaseEntry>()
-                                    .plus(existingHistoryForUser.timedOut)
-                                    .find { it.clientSentTimestamp == targetTimestamp }
-                                if (historyEntryOfTarget != null) {
+                                val replyTimestamp = database.requestQueries
+                                    .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
+                                    .executeAsOne()
+                                    .replyMessageTimestamp
+                                if (replyTimestamp != null) {
                                     sendSemaphore.withPermit {
-                                        runInterruptible {
-                                            signal.remoteDelete(replyRecipient, historyEntryOfTarget.replyMessageTimestamp)
-                                        }
+                                        runInterruptible { signal.remoteDelete(replyRecipient, replyTimestamp) }
                                     }
                                 } else {
                                     println(
@@ -421,6 +412,7 @@ class MessageProcessor(
                             when (rateLimitStatus) {
                                 is RateLimitStatus.Blocked.WithNoReply -> {
                                     println("blocking request $requestId (${rateLimitStatus.reason})")
+                                    sentReply = false
                                 }
                                 is RateLimitStatus.Blocked.WithTryAgainReply -> {
                                     println(
@@ -435,7 +427,7 @@ class MessageProcessor(
                                             replyRecipient = replyRecipient,
                                             originalMessage = incomingMessage,
                                             delay = rateLimitStatus.sendDelay,
-                                            replyTimestamp = newHistoryEntry.replyMessageTimestamp,
+                                            replyTimestamp = replyMessageTimestamp,
                                             retryAfterTimestamp = rateLimitStatus.retryAfterTimestamp,
                                             currentTimestampUsed = rateLimitStatus.currentTimestampUsed
                                         )
@@ -454,7 +446,7 @@ class MessageProcessor(
                                             replyRecipient = replyRecipient,
                                             originalMessage = incomingMessage,
                                             delay = rateLimitStatus.sendDelay,
-                                            replyTimestamp = newHistoryEntry.replyMessageTimestamp,
+                                            replyTimestamp = replyMessageTimestamp,
                                             errorMessage = rateLimitStatus.reason
                                         )
                                     )
@@ -465,7 +457,6 @@ class MessageProcessor(
                         is RateLimitStatus.SendDelayed -> {
                             sendReadReceipt(source, msgId)
                             sendTypingAfterDelay(replyRecipient)
-
                             sendDelay = rateLimitStatus.sendDelay
                         }
                     }
@@ -499,7 +490,7 @@ class MessageProcessor(
                                 replyRecipient = replyRecipient,
                                 originalMessage = incomingMessage,
                                 delay = sendDelay,
-                                replyTimestamp = newHistoryEntry.replyMessageTimestamp,
+                                replyTimestamp = replyMessageTimestamp,
                                 errorMessage = errorMsg
                             )
                         )
@@ -516,7 +507,7 @@ class MessageProcessor(
                                 replyRecipient = replyRecipient,
                                 originalMessage = incomingMessage,
                                 delay = sendDelay,
-                                replyTimestamp = newHistoryEntry.replyMessageTimestamp,
+                                replyTimestamp = replyMessageTimestamp,
                                 errorMessage = "Failed to parse LaTeX: Timed out"
                             )
                         )
@@ -527,21 +518,25 @@ class MessageProcessor(
                                 replyRecipient = replyRecipient,
                                 originalMessage = incomingMessage,
                                 delay = sendDelay,
-                                replyTimestamp = newHistoryEntry.replyMessageTimestamp,
+                                replyTimestamp = replyMessageTimestamp,
                                 latexImagePath = latexImagePath
                             )
                         )
                     }
                 } finally {
-                    existingHistoryForUser.toBuilder().apply {
-                        if (timedOut && incomingMsgType is IncomingMessageType.LatexRequestMessage) {
-                            addTimedOutEntry(
-                                newHistoryEntry.toTimedOutEntry(botConfig, incomingMsgType.latexText, identifier)
-                            )
-                        } else {
-                            addHistoryEntry(newHistoryEntry)
-                        }
-                    }.build().writeToDisk()
+                    database.requestQueries
+                        .insert(
+                            userId = identifier,
+                            serverReceiveTimestamp = serverReceiveTimestamp,
+                            clientSentTimestamp = msgId,
+                            replyMessageTimestamp = if (sentReply) replyMessageTimestamp else null,
+                            timedOut = timedOut,
+                            latexCiphertext = if (timedOut && incomingMsgType is IncomingMessageType.LatexRequestMessage) {
+                                LatexCiphertext.fromPlaintext(botConfig, incomingMsgType.latexText, identifier)
+                            } else {
+                                null
+                            }
+                        )
                 }
             }
         }
@@ -592,7 +587,7 @@ class MessageProcessor(
         value class SendDelayed(val sendDelay: Long) : RateLimitStatus
 
         companion object {
-            private fun calculateExtraDelayMillis(numEntriesInLastMinute: Int): Long {
+            private fun calculateExtraDelayMillis(numEntriesInLastMinute: Long): Long {
                 // t^2 / 25
                 val extraSeconds: Double = (numEntriesInLastMinute * numEntriesInLastMinute / 25.0)
                     .coerceAtMost(MAX_EXTRA_SEND_DELAY_SECONDS)
@@ -601,30 +596,39 @@ class MessageProcessor(
             }
 
             fun getStatus(
+                database: BotDatabase,
+                requestId: RequestId,
                 incomingMessageType: IncomingMessageType,
                 incomingMessage: IncomingMessage,
-                existingHistoryForUser: RequestHistory,
-                newHistoryEntry: RequestHistory.Entry,
-                requestId: RequestId,
                 secureKotlinRandom: Random
             ): RateLimitStatus {
-                val entriesWithinLastMinute =
-                    existingHistoryForUser.entriesWithinInterval(newHistoryEntry, MINUTE_MILLIS)
-                        .also { entries ->
-                            println(
-                                "$requestId: entriesWithinLastMinute for user: " +
-                                        "[${entries.joinToString { "${it.serverReceiveTime}" }}]"
-                            )
-                        }
-                val timedOutEntriesInLastMin =
-                    existingHistoryForUser.timedOutEntriesWithinInterval(newHistoryEntry, MINUTE_MILLIS)
+                val serverReceiveTimestamp = incomingMessage.data.serverReceiverTimestamp
+                require(serverReceiveTimestamp != null) { "missing server receiver timestamp" }
+
+                val entriesWithinLastMinute = database.requestQueries.requestsInInterval(
+                    lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
+                    upperTimestamp = serverReceiveTimestamp
+                ).executeAsOne()
+                val timedOutEntriesInLastMin = database.requestQueries.timedOutRequestsInInterval(
+                    lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
+                    upperTimestamp = serverReceiveTimestamp
+                ).executeAsOne()
 
                 val entriesInLastTwentySeconds by lazy {
-                    existingHistoryForUser.entriesWithinInterval(newHistoryEntry, TWENTY_SECOND_MILLIS)
+                    database.requestQueries.requestsInInterval(
+                        lowerTimestamp = serverReceiveTimestamp - TimeUnit.SECONDS.toMillis(20),
+                        upperTimestamp = serverReceiveTimestamp
+                    ).executeAsOne()
                 }
 
-                val sendDelayRange: LongRange = if (entriesWithinLastMinute.size != 0) {
-                    val delayAddition = calculateExtraDelayMillis(entriesWithinLastMinute.size)
+                println("request $requestId: " +
+                        "entriesWithinLastMinute=$entriesWithinLastMinute, " +
+                        "timedOutEntriesInLastMin=$timedOutEntriesInLastMin, " +
+                        "entriesInLastTwentySeconds=$entriesInLastTwentySeconds"
+                )
+
+                val sendDelayRange: LongRange = if (entriesWithinLastMinute != 0L) {
+                    val delayAddition = calculateExtraDelayMillis(entriesWithinLastMinute)
                     REPLY_DELAY_RANGE_MILLIS.let { originalRange ->
                         (originalRange.first + delayAddition)..(originalRange.last + delayAddition)
                     }
@@ -633,43 +637,59 @@ class MessageProcessor(
                 }
                 val sendDelay = secureKotlinRandom.nextLong(sendDelayRange)
 
-                if (timedOutEntriesInLastMin.isNotEmpty()) {
+                if (timedOutEntriesInLastMin != 0L) {
+                    val mostRecentTimedOutTimestamp = database
+                        .requestQueries
+                        .mostRecentTimedOutRequestTimestampInInterval(
+                            lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
+                            upperTimestamp = serverReceiveTimestamp
+                        )
+                        .executeAsOne()
+                        .serverReceiveTimestamp!!
+
                     return Blocked.WithTryAgainReply(
                         sendDelay = sendDelay,
                         reason = "sent a request that timed out within the last minute",
-                        retryAfterTimestamp = timedOutEntriesInLastMin.last().serverReceiveTime + MINUTE_MILLIS,
-                        currentTimestampUsed = newHistoryEntry.serverReceiveTime
+                        retryAfterTimestamp = mostRecentTimedOutTimestamp + TimeUnit.MINUTES.toMillis(1),
+                        currentTimestampUsed = serverReceiveTimestamp
                     )
                 } else if (
-                    entriesWithinLastMinute.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE ||
-                    entriesInLastTwentySeconds.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
+                    entriesWithinLastMinute >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE ||
+                    entriesInLastTwentySeconds >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
                 ) {
                     val reason =
-                        if (entriesWithinLastMinute.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE) {
-                            "sent ${entriesWithinLastMinute.size} requests within the last minute"
+                        if (entriesWithinLastMinute >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE) {
+                            "sent $entriesWithinLastMinute requests within the last minute"
                         } else {
-                            "sent ${entriesInLastTwentySeconds.size} requests within the last 10 seconds"
+                            "sent $entriesInLastTwentySeconds requests within the last 10 seconds"
                         }
 
                     // TODO: refactor rate limit intervals, or just do leaky bucket
                     val isAtLimitForLastMinute =
-                        entriesWithinLastMinute.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE
+                        entriesWithinLastMinute == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE
                     val isAtLimitForTwentySeconds by lazy {
-                        entriesInLastTwentySeconds.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
+                        entriesInLastTwentySeconds == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
                     }
 
                     return if (isAtLimitForLastMinute || isAtLimitForTwentySeconds) {
-                        val retryAfterTimestamp = if (isAtLimitForLastMinute) {
-                            entriesWithinLastMinute.first().serverReceiveTime + MINUTE_MILLIS
+                        val interval = if (isAtLimitForLastMinute) {
+                            TimeUnit.MINUTES.toMillis(1)
                         } else {
-                            entriesInLastTwentySeconds.first().serverReceiveTime + TWENTY_SECOND_MILLIS
+                            TimeUnit.SECONDS.toMillis(20)
                         }
+                        val retryAfterTimestamp = database.requestQueries
+                            .leastRecentTimestampInInterval(
+                                lowerTimestamp = serverReceiveTimestamp - interval,
+                                upperTimestamp = serverReceiveTimestamp
+                            )
+                            .executeAsOne()
+                            .serverReceiveTimestamp!! + interval
 
                         Blocked.WithTryAgainReply(
                             sendDelay = sendDelay,
                             reason = reason,
                             retryAfterTimestamp = retryAfterTimestamp,
-                            currentTimestampUsed = newHistoryEntry.serverReceiveTime
+                            currentTimestampUsed = serverReceiveTimestamp
                         )
                     } else {
                         Blocked.WithNoReply(reason)

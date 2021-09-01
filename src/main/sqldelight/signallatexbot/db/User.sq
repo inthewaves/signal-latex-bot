@@ -1,0 +1,11 @@
+import signallatexbot.model.UserIdentifier;
+
+/** Represents a user that has used the bot */
+CREATE TABLE User (
+    identifier TEXT AS UserIdentifier NOT NULL PRIMARY KEY
+);
+
+insertOrIgnore:
+INSERT OR IGNORE INTO User
+VALUES (?)
+;

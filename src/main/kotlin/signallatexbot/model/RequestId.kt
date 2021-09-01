@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 @JvmInline
-value class RequestId private constructor(val id: String) {
+value class RequestId constructor(val id: String) {
     val timestamp: Long get() = id.split("-").last().toLong()
     override fun toString(): String = id
     companion object {

@@ -1,0 +1,63 @@
+import java.lang.Boolean;
+import signallatexbot.model.LatexCiphertext;
+import signallatexbot.model.UserIdentifier;
+
+/** Represents request history for the bot. */
+CREATE TABLE Request (
+    userId TEXT AS UserIdentifier NOT NULL REFERENCES User(identifier) ON DELETE CASCADE,
+    /** The date that the server received the message. This will be used for comparisons and rate limiting. */
+    serverReceiveTimestamp INTEGER NOT NULL,
+    /** The client-supplied timestamp of the message, used to identify messages for reactions, remote deletes, etc. */
+    clientSentTimestamp INTEGER NOT NULL,
+    /** The timestamp of our reply. If this is null, we didn't send a reply (likely due to rate
+limiting). Used to identify our messages to act on remote delete requests. */
+    replyMessageTimestamp INTEGER,
+    /** Whether this request took too long to generate. */
+    timedOut INTEGER AS Boolean NOT NULL DEFAULT 0,
+    /** The LaTeX input for this request. We keep this here for troubleshooting / monitoring
+reasons. We ensure that it is encrypted and that we never print user's LaTeX input to stdout /
+stderr. */
+    latexCiphertext TEXT AS LatexCiphertext,
+    PRIMARY KEY(userId, serverReceiveTimestamp, clientSentTimestamp)
+);
+
+insert:
+INSERT INTO Request
+VALUES (?, ?, ?, ?, ?, ?)
+;
+
+getRequestsWithLatexCiphertext:
+SELECT *
+FROM Request
+WHERE userId = ? AND latexCiphertext IS NOT NULL
+;
+
+getReplyTimestamp:
+SELECT replyMessageTimestamp
+FROM Request
+WHERE userId = ? AND clientSentTimestamp = ?
+;
+
+requestsInInterval:
+SELECT COUNT(*)
+FROM Request
+WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp
+;
+
+timedOutRequestsInInterval:
+SELECT COUNT(*)
+FROM Request
+WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp AND timedOut = 1
+;
+
+leastRecentTimestampInInterval:
+SELECT MIN(serverReceiveTimestamp) AS serverReceiveTimestamp
+FROM Request
+WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp
+;
+
+mostRecentTimedOutRequestTimestampInInterval:
+SELECT MAX(serverReceiveTimestamp) AS serverReceiveTimestamp
+FROM Request
+WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp AND timedOut = 1
+;

@@ -7,7 +7,7 @@ import signallatexbot.core.BotConfig
 
 @Serializable
 @JvmInline
-value class LatexCiphertext private constructor(val ciphertext: Base64String) {
+value class LatexCiphertext constructor(val ciphertext: Base64String) {
     /**
      * @throws java.security.GeneralSecurityException
      */
