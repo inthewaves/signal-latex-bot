@@ -10,7 +10,6 @@ import com.github.ajalt.clikt.parameters.options.OptionValidator
 import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
-import com.github.ajalt.clikt.parameters.options.required
 import com.github.ajalt.clikt.parameters.options.validate
 import com.github.ajalt.clikt.parameters.types.file
 import com.github.ajalt.clikt.parameters.types.int
@@ -59,7 +58,8 @@ class BotCommand : CliktCommand(name = "signal-latex-bot") {
 }
 
 class DecryptHistoryCommand : CliktCommand(name = "decrypt-history") {
-    private val privateKeysetFile by option().file(mustBeReadable = true).required()
+    private val privateKeysetFile by argument().file(mustBeReadable = true)
+    private val databasePath by argument().file(mustBeReadable = true)
     private val identifier by argument()
 
     override fun run() {
@@ -68,17 +68,25 @@ class DecryptHistoryCommand : CliktCommand(name = "decrypt-history") {
 
         println("Decrypted history for identifier $userId: ")
         runBlocking {
-            withDatabase { db ->
+            withDatabase(path = databasePath.absolutePath) { db ->
                 db.requestQueries
                     .getRequestsWithLatexCiphertext(userId)
                     .executeAsSequence { sequence ->
                         sequence.forEach {
-                            val timeString = Instant.ofEpochMilli(it.serverReceiveTimestamp)
-                                .atZone(ZoneId.systemDefault())
+                            fun formatDate(timestamp: Long?): String? =
+                                timestamp
+                                    ?.let { Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()) }
+                                    ?.toString()
+
                             println(
-                                "History entry with replyMessageTimestamp=${it.replyMessageTimestamp} ($timeString) " +
+                                "History entry with " +
+                                        "replyMessageTimestamp=${it.replyMessageTimestamp} " +
+                                        "(${formatDate(it.replyMessageTimestamp)}), " +
+                                        "serverReceiveTimestamp=${it.serverReceiveTimestamp} " +
+                                        "(${formatDate(it.serverReceiveTimestamp)}) " +
                                         "has LaTeX:\n" +
-                                        it.latexCiphertext.decrypt(privateKeyset, userId).decodeToString()
+                                        it.latexCiphertext.decrypt(privateKeyset, userId).decodeToString() +
+                                        "\n================================="
                             )
                         }
                     }
