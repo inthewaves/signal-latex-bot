@@ -379,26 +379,20 @@ class MessageProcessor(
                     when (incomingMsgType) {
                         is IncomingMessageType.InvalidMessage -> error("unexpected message type")
                         is IncomingMessageType.RemoteDeleteMessage -> {
-                            val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
-                            if (rateLimitStatus is RateLimitStatus.SendDelayed && targetTimestamp != null) {
-                                delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
-                                val replyTimestamp = database.requestQueries
-                                    .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
-                                    .executeAsOne()
-                                    .replyMessageTimestamp
-                                if (replyTimestamp != null) {
-                                    sendSemaphore.withPermit {
-                                        runInterruptible { signal.remoteDelete(replyRecipient, replyTimestamp) }
-                                    }
-                                } else {
-                                    println(
-                                        "unable to handle remote delete message from $requestId, " +
-                                                "targetTimestamp: $targetTimestamp. can't find the history entry"
-                                    )
+                            val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp ?: return@withLock
+                            delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
+                            val replyTimestamp = database.requestQueries
+                                .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
+                                .executeAsOne()
+                                .replyMessageTimestamp
+                            if (replyTimestamp != null) {
+                                sendSemaphore.withPermit {
+                                    runInterruptible { signal.remoteDelete(replyRecipient, replyTimestamp) }
                                 }
                             } else {
-                                println("ignoring remote delete request " +
-                                        "(RateLimitStatus: ${rateLimitStatus::class.simpleName})"
+                                println(
+                                    "unable to handle remote delete message from $requestId, " +
+                                            "targetTimestamp: $targetTimestamp. can't find the history entry"
                                 )
                             }
                             return@withLock
