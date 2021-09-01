@@ -111,44 +111,13 @@ class MessageProcessor(
 
     private val processorScope = CoroutineScope(Dispatchers.IO + errorHandler)
 
-    private suspend fun pruneHistory() {
-        println("pruning history")
-        /*
-        val requestHistoryFiles = RequestHistory.requestHistoryRootDir.listFiles() ?: return
-        val prunedCount = AtomicLong(0)
-        coroutineScope {
-            requestHistoryFiles.asSequence()
-                .map {
-                    try {
-                        Json.decodeFromString(RequestHistory.serializer(), it.readText())
-                    } catch (e: IOException) {
-                        System.err.println("failed to read ${it.absolutePath}: ${e.stackTraceToString()}")
-                        null
-                    } catch (e: SerializationException) {
-                        System.err.println("failed to read ${it.absolutePath}: ${e.stackTraceToString()}")
-                        null
-                    }
-                }
-                .filterNotNull()
-                .forEach { oldHistory ->
-                    launch {
-                        val newHistory = oldHistory.toBuilder()
-                            .removeEntriesOlderThan(MAX_HISTORY_LIFETIME_DAYS, TimeUnit.DAYS)
-                            .build()
-
-                        if (newHistory != oldHistory) {
-                            val entriesRemoved = (oldHistory.history.size - newHistory.history.size) +
-                                    (oldHistory.timedOut.size - newHistory.timedOut.size)
-                            prunedCount.addAndGet(entriesRemoved.toLong())
-                        }
-
-                        newHistory.writeToDisk()
-                    }
-                }
+    private fun pruneHistory() {
+        database.requestQueries.apply {
+            val countBefore = count().executeAsOne()
+            deleteEntriesOlderThan(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(MAX_HISTORY_LIFETIME_DAYS))
+            val countNow = count().executeAsOne()
+            println("pruned ${countBefore - countNow} request history entries")
         }
-        println("pruned ${prunedCount.get()} history entries")
-
-         */
     }
 
     suspend fun runProcessor() {
@@ -295,29 +264,29 @@ class MessageProcessor(
         }
         val serverReceiveTimestamp = incomingMessage.data.serverReceiverTimestamp
         if (serverReceiveTimestamp == null) {
-            println("received a message without a serverReceiveTimestamp")
+            println("received a message without a serverReceiveTimestamp ($msgId)")
             return
         }
 
         val source = incomingMessage.data.source?.takeUnless { it.uuid == null || it.number == null }
         if (source == null) {
-            println("received a message without a UUID or a number as the source")
+            println("received a message without a UUID or a number as the source: ${incomingMessage.data} ($msgId)")
             return
         }
 
         if (source.uuid == signal.accountInfo?.address?.uuid || source.number == signal.accountInfo?.address?.number) {
-            println("received a message to self")
+            println("received a message to self ($msgId)")
             return
         }
 
         val isGroupV1Message = incomingMessage.data.dataMessage?.group != null
         if (isGroupV1Message) {
-            println("received a legacy group message, which we don't send to")
+            println("received a legacy group message, which we don't send to ($msgId)")
             return
         }
 
         if (incomingMessage.data.dataMessage?.endSession == true) {
-            println("received an end session message")
+            println("received an end session message ($msgId)")
             return
         }
 
@@ -325,7 +294,7 @@ class MessageProcessor(
         if (isGroupV2Message) {
             val mentionToBot = incomingMessage.data.dataMessage?.mentions?.find { it.uuid == botUuid }
             if (mentionToBot == null) {
-                println("received a V2 group message without a mention")
+                println("received a V2 group message without a mention ($msgId)")
                 return
             }
         }
@@ -333,13 +302,13 @@ class MessageProcessor(
         val replyRecipient = try {
             Recipient.forReply(incomingMessage)
         } catch (e: NullPointerException) {
-            println("failed to get reply recipient")
+            println("failed to get reply recipient ($msgId)")
             return
         }
 
         val incomingMsgType = IncomingMessageType.getHandleType(incomingMessage)
         if (incomingMsgType is IncomingMessageType.InvalidMessage) {
-            println("message doesn't have body")
+            println("message doesn't have body ($msgId)")
             return
         }
 
@@ -379,15 +348,16 @@ class MessageProcessor(
                     when (incomingMsgType) {
                         is IncomingMessageType.InvalidMessage -> error("unexpected message type")
                         is IncomingMessageType.RemoteDeleteMessage -> {
+                            sentReply = false
                             val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp ?: return@withLock
                             delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
-                            val replyTimestamp = database.requestQueries
+                            val timestampOfOurMsgToDelete = database.requestQueries
                                 .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
                                 .executeAsOne()
                                 .replyMessageTimestamp
-                            if (replyTimestamp != null) {
+                            if (timestampOfOurMsgToDelete != null) {
                                 sendSemaphore.withPermit {
-                                    runInterruptible { signal.remoteDelete(replyRecipient, replyTimestamp) }
+                                    runInterruptible { signal.remoteDelete(replyRecipient, timestampOfOurMsgToDelete) }
                                 }
                             } else {
                                 println(
@@ -822,9 +792,9 @@ class MessageProcessor(
                     }
                 }.let { if (isRetry) "$it (retry)" else it }
             }
+            println(getResultString(sendResponse, isRetry = false))
 
             val successes = sendResponse.results.count { it.success != null }
-            println(getResultString(sendResponse, isRetry = false))
             if (successes != sendResponse.results.size) {
                 println("Attempting to handle identity failures (safety number changes)")
                 var identityFailuresHandled = 0L

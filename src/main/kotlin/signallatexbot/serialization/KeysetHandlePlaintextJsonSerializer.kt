@@ -19,8 +19,8 @@ class KeysetHandlePlaintextJsonSerializer : KSerializer<KeysetHandle> {
     override val descriptor: SerialDescriptor
         get() = PrimitiveSerialDescriptor("com.google.crypto.tink.KeysetHandle", PrimitiveKind.STRING)
 
-    override fun serialize(encoder: Encoder, keysetHandle: KeysetHandle) {
-        encoder.encodeString(serializeKeysetHandle(keysetHandle))
+    override fun serialize(encoder: Encoder, value: KeysetHandle) {
+        encoder.encodeString(serializeKeysetHandle(value))
     }
 
     override fun deserialize(decoder: Decoder): KeysetHandle {

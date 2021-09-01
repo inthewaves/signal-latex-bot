@@ -26,6 +26,16 @@ INSERT INTO Request
 VALUES (?, ?, ?, ?, ?, ?)
 ;
 
+count:
+SELECT COUNT(*)
+FROM Request
+;
+
+deleteEntriesOlderThan:
+DELETE FROM Request
+WHERE serverReceiveTimestamp < :timestampTarget
+;
+
 getRequestsWithLatexCiphertext:
 SELECT *
 FROM Request
