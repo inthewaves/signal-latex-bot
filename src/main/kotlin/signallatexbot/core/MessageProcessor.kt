@@ -68,6 +68,14 @@ private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val MAX_HISTORY_LIFETIME_DAYS = 10L
 private const val MAX_LATEX_BODY_LENGTH_CHARS = 4096
 
+private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE = 15
+private val MINUTE_MILLIS = TimeUnit.MINUTES.toMillis(1)
+
+private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4
+private val TWENTY_SECOND_MILLIS = TimeUnit.SECONDS.toMillis(20)
+
+private const val MAX_EXTRA_SEND_DELAY_SECONDS = 10.0
+
 class MessageProcessor(
     private val signal: Signal,
     private val outputPhotoDir: File,
@@ -186,7 +194,7 @@ class MessageProcessor(
         mainJob.join()
     }
 
-    private sealed interface IncomingMessageType {
+    sealed interface IncomingMessageType {
         @JvmInline
         value class LatexRequestMessage(val latexText: String) : IncomingMessageType
         @JvmInline
@@ -328,8 +336,8 @@ class MessageProcessor(
             return
         }
 
-        val msgType = IncomingMessageType.getHandleType(incomingMessage)
-        if (msgType is IncomingMessageType.InvalidMessage) {
+        val incomingMsgType = IncomingMessageType.getHandleType(incomingMessage)
+        if (incomingMsgType is IncomingMessageType.InvalidMessage) {
             println("message doesn't have body")
             return
         }
@@ -347,37 +355,6 @@ class MessageProcessor(
             userMutex.withLock {
                 val existingHistoryForUser = RequestHistory.readFromFile(identifier)
 
-                val latexBodyInput: String
-                when (msgType) {
-                    is IncomingMessageType.InvalidMessage -> return@withLock
-                    is IncomingMessageType.RemoteDeleteMessage -> {
-                        val targetTimestamp = msgType.remoteDelete.targetSentTimestamp
-                        println(
-                            "handling remote delete message from ${identifier.value.take(10)}, " +
-                                    "targetTimestamp: $targetTimestamp"
-                        )
-                        delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
-                        val historyEntryOfTarget = existingHistoryForUser.history
-                            .asSequence<RequestHistory.BaseEntry>()
-                            .plus(existingHistoryForUser.timedOut)
-                            .find { it.clientSentTimestamp == targetTimestamp }
-                        if (historyEntryOfTarget != null) {
-                            sendSemaphore.withPermit {
-                                runInterruptible {
-                                    signal.remoteDelete(replyRecipient, historyEntryOfTarget.replyMessageTimestamp)
-                                }
-                            }
-                        } else {
-                            println(
-                                "unable to handle remote delete message from ${identifier.value.take(10)}, " +
-                                        "targetTimestamp: $targetTimestamp. can't find the history entry"
-                            )
-                        }
-                        return@withLock
-                    }
-                    is IncomingMessageType.LatexRequestMessage -> latexBodyInput = msgType.latexText
-                }
-
                 val newHistoryEntry = RequestHistory.Entry(
                     clientSentTimestamp = msgId,
                     serverReceiveTime = serverReceiveTimestamp,
@@ -385,18 +362,58 @@ class MessageProcessor(
                 )
 
                 var timedOut = false
-                val newHistoryBuilder = existingHistoryForUser.toBuilder()
                 try {
                     val requestId = RequestId.create(identifier)
-                    println("received LaTeX request $requestId")
+                    when (incomingMsgType) {
+                        IncomingMessageType.InvalidMessage -> error("wrong message type")
+                        is IncomingMessageType.LatexRequestMessage -> println("received LaTeX request $requestId")
+                        is IncomingMessageType.RemoteDeleteMessage -> {
+                            val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
+                            println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
+                        }
+                    }
 
                     val rateLimitStatus = RateLimitStatus.getStatus(
+                        incomingMsgType,
                         incomingMessage,
                         existingHistoryForUser,
                         newHistoryEntry,
                         requestId,
                         secureKotlinRandom
                     )
+
+                    val latexBodyInput: String
+                    when (incomingMsgType) {
+                        is IncomingMessageType.InvalidMessage -> error("unexpected message type")
+                        is IncomingMessageType.RemoteDeleteMessage -> {
+                            if (rateLimitStatus is RateLimitStatus.SendDelayed) {
+                                val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
+                                delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
+                                val historyEntryOfTarget = existingHistoryForUser.history
+                                    .asSequence<RequestHistory.BaseEntry>()
+                                    .plus(existingHistoryForUser.timedOut)
+                                    .find { it.clientSentTimestamp == targetTimestamp }
+                                if (historyEntryOfTarget != null) {
+                                    sendSemaphore.withPermit {
+                                        runInterruptible {
+                                            signal.remoteDelete(replyRecipient, historyEntryOfTarget.replyMessageTimestamp)
+                                        }
+                                    }
+                                } else {
+                                    println(
+                                        "unable to handle remote delete message from $requestId, " +
+                                                "targetTimestamp: $targetTimestamp. can't find the history entry"
+                                    )
+                                }
+                            } else {
+                                println("ignoring remote delete request " +
+                                        "(RateLimitStatus: ${rateLimitStatus::class.simpleName})"
+                                )
+                            }
+                            return@withLock
+                        }
+                        is IncomingMessageType.LatexRequestMessage -> latexBodyInput = incomingMsgType.latexText
+                    }
 
                     val sendDelay: Long
                     when (rateLimitStatus) {
@@ -516,14 +533,15 @@ class MessageProcessor(
                         )
                     }
                 } finally {
-                    if (timedOut) {
-                        newHistoryBuilder.addTimedOutEntry(
-                            newHistoryEntry.toTimedOutEntry(botConfig, latexBodyInput, identifier)
-                        )
-                    } else {
-                        newHistoryBuilder.addHistoryEntry(newHistoryEntry)
-                    }
-                    newHistoryBuilder.build().writeToDisk()
+                    existingHistoryForUser.toBuilder().apply {
+                        if (timedOut && incomingMsgType is IncomingMessageType.LatexRequestMessage) {
+                            addTimedOutEntry(
+                                newHistoryEntry.toTimedOutEntry(botConfig, incomingMsgType.latexText, identifier)
+                            )
+                        } else {
+                            addHistoryEntry(newHistoryEntry)
+                        }
+                    }.build().writeToDisk()
                 }
             }
         }
@@ -574,13 +592,16 @@ class MessageProcessor(
         value class SendDelayed(val sendDelay: Long) : RateLimitStatus
 
         companion object {
-            private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD = 10
-            private val MINUTE_MILLIS = TimeUnit.MINUTES.toMillis(1)
-
-            private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4
-            private val TWENTY_SECOND_MILLIS = TimeUnit.SECONDS.toMillis(20)
+            private fun calculateExtraDelayMillis(numEntriesInLastMinute: Int): Long {
+                // t^2 / 25
+                val extraSeconds: Double = (numEntriesInLastMinute * numEntriesInLastMinute / 25.0)
+                    .coerceAtMost(MAX_EXTRA_SEND_DELAY_SECONDS)
+                return (extraSeconds * 1000.0).roundToLong()
+                    .coerceAtLeast(0L)
+            }
 
             fun getStatus(
+                incomingMessageType: IncomingMessageType,
                 incomingMessage: IncomingMessage,
                 existingHistoryForUser: RequestHistory,
                 newHistoryEntry: RequestHistory.Entry,
@@ -598,16 +619,15 @@ class MessageProcessor(
                 val timedOutEntriesInLastMin =
                     existingHistoryForUser.timedOutEntriesWithinInterval(newHistoryEntry, MINUTE_MILLIS)
 
-                val entriesInLastTenSeconds =
+                val entriesInLastTwentySeconds by lazy {
                     existingHistoryForUser.entriesWithinInterval(newHistoryEntry, TWENTY_SECOND_MILLIS)
+                }
 
                 val sendDelayRange: LongRange = if (entriesWithinLastMinute.size != 0) {
-                    val (baseStart, baseEnd) = REPLY_DELAY_RANGE_MILLIS.let { it.first to it.last }
-                    val extraSeconds = (entriesWithinLastMinute.size * entriesWithinLastMinute.size / 18.0)
-                        .coerceAtMost(10.0)
-                    val delayAddition = (extraSeconds * 1000L).roundToLong()
-                    println("request $requestId is getting an extra $delayAddition ms of delay")
-                    (baseStart + delayAddition)..(baseEnd + delayAddition)
+                    val delayAddition = calculateExtraDelayMillis(entriesWithinLastMinute.size)
+                    REPLY_DELAY_RANGE_MILLIS.let { originalRange ->
+                        (originalRange.first + delayAddition)..(originalRange.last + delayAddition)
+                    }
                 } else {
                     REPLY_DELAY_RANGE_MILLIS
                 }
@@ -621,25 +641,28 @@ class MessageProcessor(
                         currentTimestampUsed = newHistoryEntry.serverReceiveTime
                     )
                 } else if (
-                    entriesWithinLastMinute.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD ||
-                    entriesInLastTenSeconds.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
+                    entriesWithinLastMinute.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE ||
+                    entriesInLastTwentySeconds.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
                 ) {
                     val reason =
-                        if (entriesInLastTenSeconds.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS) {
-                            "sent ${entriesInLastTenSeconds.size} request within the last 10 seconds"
-                        } else {
+                        if (entriesWithinLastMinute.size >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE) {
                             "sent ${entriesWithinLastMinute.size} requests within the last minute"
+                        } else {
+                            "sent ${entriesInLastTwentySeconds.size} requests within the last 10 seconds"
                         }
 
-                    val isAtLimitForTenSeconds =
-                        entriesInLastTenSeconds.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
-                    val isAtLimitForLastMinute = entriesWithinLastMinute.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD
+                    // TODO: refactor rate limit intervals, or just do leaky bucket
+                    val isAtLimitForLastMinute =
+                        entriesWithinLastMinute.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE
+                    val isAtLimitForTwentySeconds by lazy {
+                        entriesInLastTwentySeconds.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
+                    }
 
-                    return if (isAtLimitForTenSeconds || isAtLimitForLastMinute) {
-                        val retryAfterTimestamp = if (isAtLimitForTenSeconds) {
-                            entriesInLastTenSeconds.first().serverReceiveTime + TWENTY_SECOND_MILLIS
-                        } else {
+                    return if (isAtLimitForLastMinute || isAtLimitForTwentySeconds) {
+                        val retryAfterTimestamp = if (isAtLimitForLastMinute) {
                             entriesWithinLastMinute.first().serverReceiveTime + MINUTE_MILLIS
+                        } else {
+                            entriesInLastTwentySeconds.first().serverReceiveTime + TWENTY_SECOND_MILLIS
                         }
 
                         Blocked.WithTryAgainReply(
@@ -652,12 +675,13 @@ class MessageProcessor(
                         Blocked.WithNoReply(reason)
                     }
                 } else {
-                    val body = incomingMessage.data.dataMessage?.body
-                        ?: return Blocked.WithRejectionReply(sendDelay = sendDelay, reason = "Missing body")
-                    if (body.length >= MAX_LATEX_BODY_LENGTH_CHARS) {
-                        return Blocked.WithRejectionReply(sendDelay = sendDelay, reason = "LaTeX is too long")
+                    if (incomingMessageType is IncomingMessageType.LatexRequestMessage) {
+                        val body = incomingMessage.data.dataMessage?.body
+                            ?: return Blocked.WithRejectionReply(sendDelay = sendDelay, reason = "Missing body")
+                        if (body.length >= MAX_LATEX_BODY_LENGTH_CHARS) {
+                            return Blocked.WithRejectionReply(sendDelay = sendDelay, reason = "LaTeX is too long")
+                        }
                     }
-                    println("body length is ${body.length}")
                     return SendDelayed(sendDelay)
                 }
             }
