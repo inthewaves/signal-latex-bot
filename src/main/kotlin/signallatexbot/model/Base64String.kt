@@ -7,6 +7,7 @@ import java.util.Base64
 @JvmInline
 value class Base64String private constructor(val value: String) {
     override fun toString(): String = value
+    val bytes: ByteArray get() = Base64.getDecoder().decode(value)
     companion object {
         fun create(src: ByteArray) = Base64String(Base64.getEncoder().encodeToString(src))
     }

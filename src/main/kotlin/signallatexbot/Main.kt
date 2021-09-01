@@ -46,7 +46,6 @@ val latexGenerationThreadGroup = ThreadGroup("latex-generation").apply {
     // isDaemon = true
 }
 
-private const val USAGE = "usage: signal-latex-bot accountId outputDirectory"
 private const val BOT_NAME = "LaTeX Bot"
 private const val PRIVACY_POLICY = """
     

@@ -7,18 +7,22 @@ import signallatexbot.core.BotConfig
 
 @Serializable
 @JvmInline
-value class HybridEncryptCiphertext private constructor(val ciphertext: ByteArray) {
+value class HybridEncryptCiphertext private constructor(val ciphertext: Base64String) {
     /**
      * @throws java.security.GeneralSecurityException
      */
     fun decrypt(privateKeysetHandle: KeysetHandle, contextInfo: ByteArray = ByteArray(0)): ByteArray {
         val hybridDecrypt = privateKeysetHandle.getPrimitive(HybridDecrypt::class.java)
-        return hybridDecrypt.decrypt(ciphertext, contextInfo)!!
+        return hybridDecrypt.decrypt(ciphertext.bytes, contextInfo)!!
     }
 
     companion object {
         fun fromPlaintext(botConfig: BotConfig, plaintext: String): HybridEncryptCiphertext {
-            return HybridEncryptCiphertext(botConfig.encryptWithPublicKey(plaintext, contextInfo = ByteArray(0)))
+            return HybridEncryptCiphertext(
+                Base64String.create(
+                    botConfig.encryptWithPublicKey(plaintext, contextInfo = ByteArray(0))
+                )
+            )
         }
     }
 }
