@@ -59,11 +59,12 @@ import kotlin.math.roundToLong
 import kotlin.random.Random
 import kotlin.random.asKotlinRandom
 import kotlin.random.nextLong
+import kotlin.time.TimeSource
 
 private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
 private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
-private const val LATEX_GENERATION_TIMEOUT_MILLIS = 2000L
+private const val LATEX_GENERATION_TIMEOUT_MILLIS = 4000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val MAX_HISTORY_LIFETIME_DAYS = 10L
@@ -383,6 +384,7 @@ class MessageProcessor(
 
                     val rateLimitStatus = RateLimitStatus.getStatus(
                         database,
+                        identifier,
                         requestId,
                         incomingMsgType,
                         incomingMessage,
@@ -444,23 +446,25 @@ class MessageProcessor(
                         }
                     }
 
+                    val latexImageFile = File(outputPhotoDir, "${requestId.timestamp}.png")
+                        .apply { deleteOnExit() }
                     val latexImagePath: String? = try {
+                        val genMark = TimeSource.Monotonic.markNow()
                         latexGenerationSemaphore.withPermit {
                             println("generating LaTeX for request $requestId")
                             withNewThreadAndTimeoutOrNull(
                                 timeoutMillis = LATEX_GENERATION_TIMEOUT_MILLIS,
                                 threadGroup = latexGenerationThreadGroup
                             ) {
-                                File(outputPhotoDir, "${requestId.timestamp}.png")
-                                    .apply { deleteOnExit() }
+                                latexImageFile
                                     .also { outFile -> latexGenerator.writeLatexToPng(latexBodyInput, outFile) }
                                     .apply { addPosixPermissions(PosixFilePermission.GROUP_READ) }
                                     .absolutePath
                             }
-                        }
+                        }.also { println("LaTeX request $requestId took ${genMark.elapsedNow()}") }
                     } catch (e: Exception) {
                         System.err.println("Failed to parse LaTeX for request $requestId: ${e.stackTraceToString()}")
-
+                        latexImageFile.delete()
                         val errorMsg = if (e is ParseException && !e.message.isNullOrBlank()) {
                             "Failed to parse LaTeX: ${e.message}"
                         } else {
@@ -483,6 +487,7 @@ class MessageProcessor(
 
                     if (latexImagePath == null) {
                         System.err.println("LaTeX request $requestId timed out")
+                        latexImageFile.delete()
                         timedOut = true
                         sendMessage(
                             Reply.Error(
@@ -580,6 +585,7 @@ class MessageProcessor(
 
             fun getStatus(
                 database: BotDatabase,
+                identifier: UserIdentifier,
                 requestId: RequestId,
                 incomingMessageType: IncomingMessageType,
                 incomingMessage: IncomingMessage,
@@ -589,16 +595,19 @@ class MessageProcessor(
                 require(serverReceiveTimestamp != null) { "missing server receiver timestamp" }
 
                 val entriesWithinLastMinute = database.requestQueries.requestsInInterval(
+                    userId = identifier,
                     lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
                     upperTimestamp = serverReceiveTimestamp
                 ).executeAsOne()
                 val timedOutEntriesInLastMin = database.requestQueries.timedOutRequestsInInterval(
+                    userId = identifier,
                     lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
                     upperTimestamp = serverReceiveTimestamp
                 ).executeAsOne()
 
                 val entriesInLastTwentySeconds by lazy {
                     database.requestQueries.requestsInInterval(
+                        userId = identifier,
                         lowerTimestamp = serverReceiveTimestamp - TimeUnit.SECONDS.toMillis(20),
                         upperTimestamp = serverReceiveTimestamp
                     ).executeAsOne()
@@ -624,6 +633,7 @@ class MessageProcessor(
                     val mostRecentTimedOutTimestamp = database
                         .requestQueries
                         .mostRecentTimedOutRequestTimestampInInterval(
+                            userId = identifier,
                             lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
                             upperTimestamp = serverReceiveTimestamp
                         )
@@ -662,6 +672,7 @@ class MessageProcessor(
                         }
                         val retryAfterTimestamp = database.requestQueries
                             .leastRecentTimestampInInterval(
+                                userId = identifier,
                                 lowerTimestamp = serverReceiveTimestamp - interval,
                                 upperTimestamp = serverReceiveTimestamp
                             )

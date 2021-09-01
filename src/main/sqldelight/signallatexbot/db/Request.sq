@@ -51,23 +51,23 @@ WHERE userId = ? AND clientSentTimestamp = ?
 requestsInInterval:
 SELECT COUNT(*)
 FROM Request
-WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp
+WHERE userId = ? AND serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp
 ;
 
 timedOutRequestsInInterval:
 SELECT COUNT(*)
 FROM Request
-WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp AND timedOut = 1
+WHERE userId = ? AND serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp AND timedOut = 1
 ;
 
 leastRecentTimestampInInterval:
 SELECT MIN(serverReceiveTimestamp) AS serverReceiveTimestamp
 FROM Request
-WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp
+WHERE userId = ? AND serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp
 ;
 
 mostRecentTimedOutRequestTimestampInInterval:
 SELECT MAX(serverReceiveTimestamp) AS serverReceiveTimestamp
 FROM Request
-WHERE serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp AND timedOut = 1
+WHERE userId = ? AND serverReceiveTimestamp BETWEEN :lowerTimestamp AND :upperTimestamp AND timedOut = 1
 ;
