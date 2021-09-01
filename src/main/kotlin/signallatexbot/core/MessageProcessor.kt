@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import org.inthewaves.kotlinsignald.Fingerprint
 import org.inthewaves.kotlinsignald.Recipient
 import org.inthewaves.kotlinsignald.Signal
@@ -50,6 +51,7 @@ import java.security.SecureRandom
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.io.path.absolute
@@ -103,7 +105,10 @@ class MessageProcessor(
     private val identifierMutexes = hashMapOf<UserIdentifier, Mutex>()
 
     private val errorHandler = CoroutineExceptionHandler { coroutineContext, throwable ->
-        System.err.println("Error occurred when processing incoming messages: ${throwable.stackTraceToString()}")
+        val requestId: RequestId? = coroutineContext[RequestId]
+        System.err.println(
+            "Exception when processing incoming messages (requestId: $requestId): ${throwable.stackTraceToString()}"
+        )
     }
 
     private val addressToIdentifierCache =
@@ -250,6 +255,13 @@ class MessageProcessor(
         }
     }
 
+    private suspend inline fun <T> Mutex.withLockAndContext(
+        coroutineContext: CoroutineContext,
+        crossinline block: suspend CoroutineScope.() -> T
+    ): T = withLock {
+        withContext(coroutineContext) { block() }
+    }
+
     private fun CoroutineScope.handleIncomingMessage(incomingMessage: IncomingMessage) {
         incomingMessage.data.dataMessage?.reaction?.let { jsonReaction ->
             if (jsonReaction.targetAuthor?.uuid == signal.accountInfo!!.address?.uuid) {
@@ -262,6 +274,16 @@ class MessageProcessor(
             println("received a message without a timestamp")
             return
         }
+
+        val isGroupV2Message = incomingMessage.data.dataMessage?.groupV2 != null
+        if (isGroupV2Message && incomingMessage.data.dataMessage?.remoteDelete == null) {
+            val mentionToBot = incomingMessage.data.dataMessage?.mentions?.find { it.uuid == botUuid }
+            if (mentionToBot == null) {
+                println("received a V2 group message without a mention ($msgId)")
+                return
+            }
+        }
+
         val serverReceiveTimestamp = incomingMessage.data.serverReceiverTimestamp
         if (serverReceiveTimestamp == null) {
             println("received a message without a serverReceiveTimestamp ($msgId)")
@@ -290,15 +312,6 @@ class MessageProcessor(
             return
         }
 
-        val isGroupV2Message = incomingMessage.data.dataMessage?.groupV2 != null
-        if (isGroupV2Message) {
-            val mentionToBot = incomingMessage.data.dataMessage?.mentions?.find { it.uuid == botUuid }
-            if (mentionToBot == null) {
-                println("received a V2 group message without a mention ($msgId)")
-                return
-            }
-        }
-
         val replyRecipient = try {
             Recipient.forReply(incomingMessage)
         } catch (e: NullPointerException) {
@@ -319,22 +332,45 @@ class MessageProcessor(
             val userMutex = identifierMutexesMutex.withLock {
                 identifierMutexes.getOrPut(identifier) { Mutex() }
             }
+            val requestId = RequestId.create(identifier, incomingMessage)
 
-            userMutex.withLock {
+            userMutex.withLockAndContext(requestId) {
                 val replyMessageTimestamp by lazy { System.currentTimeMillis() }
+                val latexBodyInput: String
+                when (incomingMsgType) {
+                    is IncomingMessageType.InvalidMessage -> error("unexpected message type")
+                    is IncomingMessageType.RemoteDeleteMessage -> {
+                        val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
+                        if (targetTimestamp == null) {
+                            println("received remote delete request $requestId, targetTimestamp is null so rejecting")
+                            return@withLockAndContext
+                        }
+
+                        println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
+                        delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
+                        val timestampOfOurMsgToDelete = database.requestQueries
+                            .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
+                            .executeAsOne()
+                            .replyMessageTimestamp
+                        if (timestampOfOurMsgToDelete != null) {
+                            sendSemaphore.withPermit {
+                                runInterruptible { signal.remoteDelete(replyRecipient, timestampOfOurMsgToDelete) }
+                            }
+                        } else {
+                            println(
+                                "unable to handle remote delete message from $requestId, " +
+                                        "targetTimestamp: $targetTimestamp. can't find the history entry"
+                            )
+                        }
+                        return@withLockAndContext
+                    }
+                    is IncomingMessageType.LatexRequestMessage -> latexBodyInput = incomingMsgType.latexText
+                }
 
                 var timedOut = false
                 var sentReply = true
                 try {
-                    val requestId = RequestId.create(identifier)
-                    when (incomingMsgType) {
-                        IncomingMessageType.InvalidMessage -> error("wrong message type")
-                        is IncomingMessageType.LatexRequestMessage -> println("received LaTeX request $requestId")
-                        is IncomingMessageType.RemoteDeleteMessage -> {
-                            val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
-                            println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
-                        }
-                    }
+                    println("received LaTeX request $requestId")
 
                     val rateLimitStatus = RateLimitStatus.getStatus(
                         database,
@@ -343,32 +379,6 @@ class MessageProcessor(
                         incomingMessage,
                         secureKotlinRandom
                     )
-
-                    val latexBodyInput: String
-                    when (incomingMsgType) {
-                        is IncomingMessageType.InvalidMessage -> error("unexpected message type")
-                        is IncomingMessageType.RemoteDeleteMessage -> {
-                            sentReply = false
-                            val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp ?: return@withLock
-                            delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
-                            val timestampOfOurMsgToDelete = database.requestQueries
-                                .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
-                                .executeAsOne()
-                                .replyMessageTimestamp
-                            if (timestampOfOurMsgToDelete != null) {
-                                sendSemaphore.withPermit {
-                                    runInterruptible { signal.remoteDelete(replyRecipient, timestampOfOurMsgToDelete) }
-                                }
-                            } else {
-                                println(
-                                    "unable to handle remote delete message from $requestId, " +
-                                            "targetTimestamp: $targetTimestamp. can't find the history entry"
-                                )
-                            }
-                            return@withLock
-                        }
-                        is IncomingMessageType.LatexRequestMessage -> latexBodyInput = incomingMsgType.latexText
-                    }
 
                     val sendDelay: Long
                     when (rateLimitStatus) {
@@ -416,7 +426,7 @@ class MessageProcessor(
                                     )
                                 }
                             }
-                            return@launch
+                            return@withLockAndContext
                         }
                         is RateLimitStatus.SendDelayed -> {
                             sendReadReceipt(source, msgId)
@@ -459,7 +469,7 @@ class MessageProcessor(
                             )
                         )
                         if (e is CancellationException) throw e
-                        return@withLock
+                        return@withLockAndContext
                     }
 
                     if (latexImagePath == null) {
@@ -495,7 +505,7 @@ class MessageProcessor(
                             clientSentTimestamp = msgId,
                             replyMessageTimestamp = if (sentReply) replyMessageTimestamp else null,
                             timedOut = timedOut,
-                            latexCiphertext = if (timedOut && incomingMsgType is IncomingMessageType.LatexRequestMessage) {
+                            latexCiphertext = if (timedOut) {
                                 LatexCiphertext.fromPlaintext(botConfig, incomingMsgType.latexText, identifier)
                             } else {
                                 null
