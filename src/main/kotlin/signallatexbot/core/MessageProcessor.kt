@@ -35,18 +35,12 @@ import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.RemoteDelete
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
-import org.scilab.forge.jlatexmath.TeXConstants
-import org.scilab.forge.jlatexmath.TeXFormula
 import signallatexbot.latexGenerationThreadGroup
 import signallatexbot.model.RequestHistory
 import signallatexbot.model.RequestId
 import signallatexbot.model.UserIdentifier
 import signallatexbot.util.AddressIdentifierCache
 import signallatexbot.util.addPosixPermissions
-import java.awt.AlphaComposite
-import java.awt.Color
-import java.awt.Insets
-import java.awt.image.BufferedImage
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -57,8 +51,6 @@ import java.security.SecureRandom
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
-import javax.imageio.ImageIO
-import javax.swing.JLabel
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.io.path.absolute
@@ -74,12 +66,13 @@ private const val LATEX_GENERATION_TIMEOUT_MILLIS = 2000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val MAX_HISTORY_LIFETIME_DAYS = 10L
-private const val MAX_LATEX_BODY_LENGTH_CHARS = 2048
+private const val MAX_LATEX_BODY_LENGTH_CHARS = 4096
 
 class MessageProcessor(
     private val signal: Signal,
     private val outputPhotoDir: File,
-    private val botConfig: BotConfig
+    private val botConfig: BotConfig,
+    private val latexGenerator: LatexGenerator,
 ) : AutoCloseable {
     private val botUuid = signal.accountInfo?.address?.uuid ?: error("bot doesn't have UUID")
 
@@ -469,7 +462,7 @@ class MessageProcessor(
                             ) {
                                 File(outputPhotoDir, "${requestId.timestamp}.png")
                                     .apply { deleteOnExit() }
-                                    .also { outFile -> writeLatexToPng(latexBodyInput, outFile) }
+                                    .also { outFile -> latexGenerator.writeLatexToPng(latexBodyInput, outFile) }
                                     .apply { addPosixPermissions(PosixFilePermission.GROUP_READ) }
                                     .absolutePath
                             }
@@ -554,35 +547,6 @@ class MessageProcessor(
             }
         } catch (e: SignaldException) {
             System.err.println("failed to send read receipt / typing indicator: ${e.stackTraceToString()}")
-        }
-    }
-
-    private fun writeLatexToPng(latexString: String, outputFile: File) {
-        require(!outputFile.isDirectory) { "output file can't be a directory" }
-
-        val formula = TeXFormula(latexString)
-        val icon = formula.createTeXIcon(TeXConstants.STYLE_DISPLAY, 70f).apply {
-            val insetSize = 50
-            insets = Insets(insetSize, insetSize, insetSize, insetSize)
-        }
-
-        val bufferedImage = BufferedImage(icon.iconWidth, icon.iconHeight, BufferedImage.TYPE_INT_ARGB)
-        val graphics = bufferedImage.createGraphics().apply {
-            // FIXME: This doesn't work
-            val transparentBackground = true
-            if (transparentBackground) {
-                composite = AlphaComposite.Src
-            } else {
-                color = Color.white
-            }
-            fillRect(0, 0, icon.iconWidth, icon.iconHeight)
-        }
-        try {
-            val jLabel = JLabel().apply { foreground = Color.black }
-            icon.paintIcon(jLabel, graphics, 0, 0)
-            ImageIO.write(bufferedImage, "png", outputFile)
-        } finally {
-            graphics.dispose()
         }
     }
 

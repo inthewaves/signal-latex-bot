@@ -25,6 +25,7 @@ import org.inthewaves.kotlinsignald.Signal
 import org.inthewaves.kotlinsignald.SocketUnavailableException
 import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import signallatexbot.core.BotConfig
+import signallatexbot.core.JLaTeXMathGenerator
 import signallatexbot.core.MessageProcessor
 import signallatexbot.model.RequestHistory
 import signallatexbot.serialization.KeysetHandlePlaintextJsonSerializer
@@ -110,8 +111,6 @@ abstract class BaseSignaldCommand(name: String? = null, help: String = "") : Cli
             }
         }
     }
-
-    open val promptUserForConfig: Boolean = false
 
     final override fun run() {
         val botConfig = Json.decodeFromString(BotConfig.serializer(), configFile.readText())
@@ -396,7 +395,7 @@ class RunCommand : BaseSignaldCommand(name = "run", help = "Runs the bot") {
 
         println("Starting bot")
         runBlocking {
-            MessageProcessor(signal, outputDirectory, botConfig).use { messageProcessor ->
+            MessageProcessor(signal, outputDirectory, botConfig, JLaTeXMathGenerator()).use { messageProcessor ->
                 messageProcessor.runProcessor()
             }
         }
