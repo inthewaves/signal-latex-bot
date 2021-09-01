@@ -74,6 +74,7 @@ private const val LATEX_GENERATION_TIMEOUT_MILLIS = 2000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 private const val MAX_HISTORY_LIFETIME_DAYS = 10L
+private const val MAX_LATEX_BODY_LENGTH_CHARS = 2048
 
 class MessageProcessor(
     private val signal: Signal,
@@ -278,25 +279,25 @@ class MessageProcessor(
         }
     }
 
-    private fun CoroutineScope.handleIncomingMessage(message: IncomingMessage) {
-        message.data.dataMessage?.reaction?.let { jsonReaction ->
+    private fun CoroutineScope.handleIncomingMessage(incomingMessage: IncomingMessage) {
+        incomingMessage.data.dataMessage?.reaction?.let { jsonReaction ->
             if (jsonReaction.targetAuthor?.uuid == signal.accountInfo!!.address?.uuid) {
                 println("got a reaction to our own message")
             }
         }
 
-        val msgId = message.data.timestamp
+        val msgId = incomingMessage.data.timestamp
         if (msgId == null) {
             println("received a message without a timestamp")
             return
         }
-        val serverReceiveTimestamp = message.data.serverReceiverTimestamp
+        val serverReceiveTimestamp = incomingMessage.data.serverReceiverTimestamp
         if (serverReceiveTimestamp == null) {
             println("received a message without a serverReceiveTimestamp")
             return
         }
 
-        val source = message.data.source?.takeUnless { it.uuid == null || it.number == null }
+        val source = incomingMessage.data.source?.takeUnless { it.uuid == null || it.number == null }
         if (source == null) {
             println("received a message without a UUID or a number as the source")
             return
@@ -307,20 +308,20 @@ class MessageProcessor(
             return
         }
 
-        val isGroupV1Message = message.data.dataMessage?.group != null
+        val isGroupV1Message = incomingMessage.data.dataMessage?.group != null
         if (isGroupV1Message) {
             println("received a legacy group message, which we don't send to")
             return
         }
 
-        if (message.data.dataMessage?.endSession == true) {
+        if (incomingMessage.data.dataMessage?.endSession == true) {
             println("received an end session message")
             return
         }
 
-        val isGroupV2Message = message.data.dataMessage?.groupV2 != null
+        val isGroupV2Message = incomingMessage.data.dataMessage?.groupV2 != null
         if (isGroupV2Message) {
-            val mentionToBot = message.data.dataMessage?.mentions?.find { it.uuid == botUuid }
+            val mentionToBot = incomingMessage.data.dataMessage?.mentions?.find { it.uuid == botUuid }
             if (mentionToBot == null) {
                 println("received a V2 group message without a mention")
                 return
@@ -328,13 +329,13 @@ class MessageProcessor(
         }
 
         val replyRecipient = try {
-            Recipient.forReply(message)
+            Recipient.forReply(incomingMessage)
         } catch (e: NullPointerException) {
             println("failed to get reply recipient")
             return
         }
 
-        val msgType = IncomingMessageType.getHandleType(message)
+        val msgType = IncomingMessageType.getHandleType(incomingMessage)
         if (msgType is IncomingMessageType.InvalidMessage) {
             println("message doesn't have body")
             return
@@ -357,12 +358,12 @@ class MessageProcessor(
                 when (msgType) {
                     is IncomingMessageType.InvalidMessage -> return@withLock
                     is IncomingMessageType.RemoteDeleteMessage -> {
-                        sendReadReceiptAndTyping(replyRecipient, source, msgId)
                         val targetTimestamp = msgType.remoteDelete.targetSentTimestamp
                         println(
                             "handling remote delete message from ${identifier.value.take(10)}, " +
                                     "targetTimestamp: $targetTimestamp"
                         )
+                        delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
                         val historyEntryOfTarget = existingHistoryForUser.history
                             .asSequence<RequestHistory.BaseEntry>()
                             .plus(existingHistoryForUser.timedOut)
@@ -397,6 +398,7 @@ class MessageProcessor(
                     println("received LaTeX request $requestId")
 
                     val rateLimitStatus = RateLimitStatus.getStatus(
+                        incomingMessage,
                         existingHistoryForUser,
                         newHistoryEntry,
                         requestId,
@@ -407,19 +409,21 @@ class MessageProcessor(
                     when (rateLimitStatus) {
                         is RateLimitStatus.Blocked -> {
                             when (rateLimitStatus) {
-                                is RateLimitStatus.Blocked.WithNoMessage -> {
+                                is RateLimitStatus.Blocked.WithNoReply -> {
                                     println("blocking request $requestId (${rateLimitStatus.reason})")
                                 }
-                                is RateLimitStatus.Blocked.WithTryAgainMessage -> {
+                                is RateLimitStatus.Blocked.WithTryAgainReply -> {
                                     println(
                                         "blocking request $requestId (${rateLimitStatus.reason}) and sending a try again"
                                     )
-                                    sendReadReceiptAndTyping(replyRecipient, source, msgId)
+                                    sendReadReceipt(source, msgId)
+                                    sendTypingAfterDelay(replyRecipient)
+
                                     sendMessage(
                                         Reply.TryAgainMessage(
                                             requestId = requestId,
                                             replyRecipient = replyRecipient,
-                                            originalMessage = message,
+                                            originalMessage = incomingMessage,
                                             delay = rateLimitStatus.sendDelay,
                                             replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                             retryAfterTimestamp = rateLimitStatus.retryAfterTimestamp,
@@ -427,12 +431,31 @@ class MessageProcessor(
                                         )
                                     )
                                 }
-                                else -> System.err.println("Warning: Unexpected blocked state")
+                                is RateLimitStatus.Blocked.WithRejectionReply -> {
+                                    println(
+                                        "blocking request $requestId (${rateLimitStatus.reason}) and sending back error"
+                                    )
+                                    sendReadReceipt(source, msgId)
+                                    sendTypingAfterDelay(replyRecipient)
+
+                                    sendMessage(
+                                        Reply.Error(
+                                            requestId = requestId,
+                                            replyRecipient = replyRecipient,
+                                            originalMessage = incomingMessage,
+                                            delay = rateLimitStatus.sendDelay,
+                                            replyTimestamp = newHistoryEntry.replyMessageTimestamp,
+                                            errorMessage = rateLimitStatus.reason
+                                        )
+                                    )
+                                }
                             }
                             return@launch
                         }
                         is RateLimitStatus.SendDelayed -> {
-                            sendReadReceiptAndTyping(replyRecipient, source, msgId)
+                            sendReadReceipt(source, msgId)
+                            sendTypingAfterDelay(replyRecipient)
+
                             sendDelay = rateLimitStatus.sendDelay
                         }
                     }
@@ -464,7 +487,7 @@ class MessageProcessor(
                             Reply.Error(
                                 requestId = requestId,
                                 replyRecipient = replyRecipient,
-                                originalMessage = message,
+                                originalMessage = incomingMessage,
                                 delay = sendDelay,
                                 replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                 errorMessage = errorMsg
@@ -481,7 +504,7 @@ class MessageProcessor(
                             Reply.Error(
                                 requestId = requestId,
                                 replyRecipient = replyRecipient,
-                                originalMessage = message,
+                                originalMessage = incomingMessage,
                                 delay = sendDelay,
                                 replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                 errorMessage = "Failed to parse LaTeX: Timed out"
@@ -492,7 +515,7 @@ class MessageProcessor(
                             Reply.LatexReply(
                                 requestId = requestId,
                                 replyRecipient = replyRecipient,
-                                originalMessage = message,
+                                originalMessage = incomingMessage,
                                 delay = sendDelay,
                                 replyTimestamp = newHistoryEntry.replyMessageTimestamp,
                                 latexImagePath = latexImagePath
@@ -513,11 +536,18 @@ class MessageProcessor(
         }
     }
 
-    private suspend fun sendReadReceiptAndTyping(replyRecipient: Recipient, source: JsonAddress, msgId: Long) {
+    private suspend fun sendReadReceipt(source: JsonAddress, msgId: Long) {
         try {
             sendSemaphore.withPermit {
                 runInterruptible { signal.markRead(source, listOf(msgId)) }
             }
+        } catch (e: SignaldException) {
+            System.err.println("failed to send read receipt: ${e.stackTraceToString()}")
+        }
+    }
+
+    private suspend fun sendTypingAfterDelay(replyRecipient: Recipient) {
+        try {
             delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
             sendSemaphore.withPermit {
                 runInterruptible { signal.typing(replyRecipient, isTyping = true) }
@@ -561,13 +591,18 @@ class MessageProcessor(
             val reason: String
 
             @JvmInline
-            value class WithNoMessage(override val reason: String) : Blocked
+            value class WithNoReply(override val reason: String) : Blocked
 
-            data class WithTryAgainMessage(
+            data class WithTryAgainReply(
                 override val reason: String,
                 val sendDelay: Long,
                 val retryAfterTimestamp: Long,
                 val currentTimestampUsed: Long
+            ) : Blocked
+
+            data class WithRejectionReply(
+                override val reason: String,
+                val sendDelay: Long,
             ) : Blocked
         }
 
@@ -582,6 +617,7 @@ class MessageProcessor(
             private val TWENTY_SECOND_MILLIS = TimeUnit.SECONDS.toMillis(20)
 
             fun getStatus(
+                incomingMessage: IncomingMessage,
                 existingHistoryForUser: RequestHistory,
                 newHistoryEntry: RequestHistory.Entry,
                 requestId: RequestId,
@@ -613,8 +649,8 @@ class MessageProcessor(
                 }
                 val sendDelay = secureKotlinRandom.nextLong(sendDelayRange)
 
-                return if (timedOutEntriesInLastMin.isNotEmpty()) {
-                    Blocked.WithTryAgainMessage(
+                if (timedOutEntriesInLastMin.isNotEmpty()) {
+                    return Blocked.WithTryAgainReply(
                         sendDelay = sendDelay,
                         reason = "sent a request that timed out within the last minute",
                         retryAfterTimestamp = timedOutEntriesInLastMin.last().serverReceiveTime + MINUTE_MILLIS,
@@ -635,24 +671,30 @@ class MessageProcessor(
                         entriesInLastTenSeconds.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS
                     val isAtLimitForLastMinute = entriesWithinLastMinute.size == HARD_LIMIT_MESSAGE_COUNT_THRESHOLD
 
-                    if (isAtLimitForTenSeconds || isAtLimitForLastMinute) {
+                    return if (isAtLimitForTenSeconds || isAtLimitForLastMinute) {
                         val retryAfterTimestamp = if (isAtLimitForTenSeconds) {
                             entriesInLastTenSeconds.first().serverReceiveTime + TWENTY_SECOND_MILLIS
                         } else {
                             entriesWithinLastMinute.first().serverReceiveTime + MINUTE_MILLIS
                         }
 
-                        Blocked.WithTryAgainMessage(
+                        Blocked.WithTryAgainReply(
                             sendDelay = sendDelay,
                             reason = reason,
                             retryAfterTimestamp = retryAfterTimestamp,
                             currentTimestampUsed = newHistoryEntry.serverReceiveTime
                         )
                     } else {
-                        Blocked.WithNoMessage(reason)
+                        Blocked.WithNoReply(reason)
                     }
                 } else {
-                    SendDelayed(sendDelay)
+                    val body = incomingMessage.data.dataMessage?.body
+                        ?: return Blocked.WithRejectionReply(sendDelay = sendDelay, reason = "Missing body")
+                    if (body.length >= MAX_LATEX_BODY_LENGTH_CHARS) {
+                        return Blocked.WithRejectionReply(sendDelay = sendDelay, reason = "LaTeX is too long")
+                    }
+                    println("body length is ${body.length}")
+                    return SendDelayed(sendDelay)
                 }
             }
         }
