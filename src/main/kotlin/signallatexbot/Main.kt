@@ -26,6 +26,7 @@ import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import signallatexbot.core.BotConfig
 import signallatexbot.core.JLaTeXMathGenerator
 import signallatexbot.core.MessageProcessor
+import signallatexbot.core.PodmanLatexGenerator
 import signallatexbot.db.executeAsSequence
 import signallatexbot.db.withDatabase
 import signallatexbot.model.UserIdentifier
@@ -55,6 +56,22 @@ private const val PRIVACY_POLICY = """
 
 class BotCommand : CliktCommand(name = "signal-latex-bot") {
     override fun run() {}
+}
+
+class PodmanTestCommand : CliktCommand(name = "podman-test") {
+    private val outputFile by argument().file(mustExist = false)
+
+    override fun run() {
+        val latexInput = TermUi.editText(
+            """
+                
+                % Enter some LaTeX above
+            """.trimIndent()
+        ) ?: error("no latex input")
+
+        val generator = PodmanLatexGenerator()
+        generator.writeLatexToPng(latexInput, outputFile)
+    }
 }
 
 class DecryptHistoryCommand : CliktCommand(name = "decrypt-history") {
@@ -424,6 +441,12 @@ fun main(args: Array<String>) {
     HybridConfig.register()
 
     BotCommand()
-        .subcommands(RunCommand(), UpdateProfileCommand(), UpdateConfigCommand(), DecryptHistoryCommand())
+        .subcommands(
+            RunCommand(),
+            UpdateProfileCommand(),
+            UpdateConfigCommand(),
+            DecryptHistoryCommand(),
+            PodmanTestCommand()
+        )
         .main(args)
 }

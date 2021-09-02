@@ -8,6 +8,17 @@ Try it out by messaging +14046091473 on Signal.
 ![An example of the LaTeX bot output](./images/latexbotexample.png)
 
 ### Installation
+5,248 MB of additional disk space will be used
+
+```bash
+apt install libcap-dev texlive-full python-pygments gnuplot make git
+tar -xf bubblewrap-0.5.0.tar.xz 
+./configure && make && make install
+
+dvipng -D 1200 -T tight eqn.dvi -o eqn.png
+https://man7.org/linux/man-pages/man1/prlimit.1.html
+
+```
 
 These are installations for a Debian-based installation.
 

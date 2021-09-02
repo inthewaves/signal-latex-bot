@@ -8,6 +8,7 @@ import java.awt.Insets
 import java.awt.image.BufferedImage
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import javax.imageio.IIOImage
 import javax.imageio.ImageIO
 import javax.imageio.ImageTypeSpecifier
@@ -24,6 +25,217 @@ import kotlin.time.measureTimedValue
 
 interface LatexGenerator {
     fun writeLatexToPng(latexString: String, outputFile: File)
+}
+
+class PodmanLatexGenerator : LatexGenerator {
+    private val seccompJsonFile = createSeccompFile()
+
+    private fun createSeccompFile(): File {
+        return Files.createTempFile("latexseccomp", ".json")
+            .toFile()
+            .apply {
+                deleteOnExit()
+                // setPosixPermissions("r--r--r--")
+                writeText(LATEX_SECCOMP)
+            }
+    }
+
+    override fun writeLatexToPng(latexString: String, outputFile: File) {
+        val tempTexDir = Files.createTempDirectory("temp-test-${System.currentTimeMillis()}")
+            .toFile()
+            .apply {
+                deleteOnExit()
+                if (!exists() && !mkdirs()) throw IOException("Unable to make dir")
+            }
+        try {
+            val tempTexFile = File(tempTexDir, "$BASE_FILENAME.tex")
+            writeTexFile(latexString, tempTexFile)
+
+            val seccompFileToUse = seccompJsonFile.takeIf { it.canRead() } ?: createSeccompFile()
+            val process = ProcessBuilder(
+                "podman", "run",
+                "--cap-drop", "all",
+                "--net", "none",
+                "--security-opt", "seccomp=${seccompFileToUse.absolutePath}",
+                "--rm",
+                "--read-only",
+                "--memory", "${MAX_MEMORY_MEGABYTES}m",
+                "--name", "LOL",
+                "--cpus", "0.25",
+                "--timeout", "5",
+                "-v", "${tempTexDir.absolutePath}:/data",
+                IMAGE_NAME,
+                "/bin/sh", "-c", LATEX_COMMAND
+            ).start()
+            process.waitFor()
+            val output = process.inputStream?.bufferedReader()?.use { it.readText() }
+            val stdErrOutput = process.errorStream?.bufferedReader()?.use { it.readText() }
+            println("Output: $output")
+            println("StdErr: $stdErrOutput")
+            if (process.exitValue() != 0) {
+                throw IOException("non-successful exit value: ${process.exitValue()}")
+            }
+            tempTexDir.walkTopDown().forEach {
+                println("$it")
+            }
+
+            val pngInTmp = File(tempTexDir, BASE_PNG_FILENAME)
+            if (!pngInTmp.canRead()) {
+                throw IOException("can't read output PNG")
+            }
+            pngInTmp.copyTo(outputFile, overwrite = true)
+        } finally {
+            tempTexDir.deleteRecursively()
+        }
+    }
+
+    companion object {
+        private val BLOCKED: Regex = run {
+            val blocked = sequenceOf(
+                "catcode", "usepackage", "include", "csname", "endcsname", "input", "jobname", "newread", "openin",
+                "read", "readline", "relax", "write"
+            )
+
+            Regex("""(\\@{0,2}(${blocked.joinToString("|")}))|(\^\^5c)""")
+        }
+
+        private val PREAMBLE = """
+            \documentclass[12pt]{article}
+            \usepackage{amsmath}
+            \usepackage{amssymb}
+            \usepackage{amsfonts}
+            \usepackage{xcolor}
+            \usepackage{siunitx}
+            \usepackage[utf8]{inputenc}
+            \thispagestyle{empty}
+        """.trimIndent()
+        private const val OPENING = """\begin{document}"""
+        private const val ENDING = """\end{document}"""
+        private const val IMAGE_NAME = "docker.io/blang/latex:ubuntu"
+        private const val BASE_FILENAME = "eqn"
+        private const val BASE_TEX_FILENAME = "$BASE_FILENAME.tex"
+        private const val BASE_DVI_FILENAME = "$BASE_FILENAME.dvi"
+        private const val BASE_PNG_FILENAME = "$BASE_FILENAME.png"
+
+        private const val MAX_MEMORY_MEGABYTES = 100
+
+        private val LATEX_COMMAND = """
+            set -o errexit
+            
+            echo 'openout_any = p\nopenin_any = p' > /tmp/texmf.cnf
+            export TEXMFCNF='/tmp:'
+            # Compile .tex file to .dvi file. Timeout kills it after 5 seconds if held up
+            timeout 5 latex -no-shell-escape -interaction=nonstopmode -halt-on-error $BASE_TEX_FILENAME
+            dvipng -D 800 -T tight $BASE_DVI_FILENAME -o $BASE_PNG_FILENAME
+        """.trimIndent()
+
+        /**
+         * Generated from these steps (on Fedora 33):
+         *
+         *     $ curl -O https://kojipkgs.fedoraproject.org//packages/oci-seccomp-bpf-hook/1.2.3/1.fc33/x86_64/oci-seccomp-bpf-hook-1.2.3-1.fc33.x86_64.rpm
+         *     $ sudo dnf install oci-seccomp-bpf-hook-1.2.3-1.fc33.x86_64.rpm
+         *     $ sudo podman run --annotation io.containers.trace-syscall="of:$PWD/latexseccomp.json" \
+         *           --net none \
+         *           -v $HOME/sandbox:/data \
+         *           "docker.io/blang/latex:ubuntu" /bin/sh -c "$containerCmds"
+         *
+         * More information: [https://www.redhat.com/sysadmin/container-security-seccomp]
+         */
+        private val LATEX_SECCOMP = """
+            {
+              "defaultAction" : "SCMP_ACT_ERRNO",
+              "syscalls" : [
+                {
+                  "includes" : {},
+                  "action" : "SCMP_ACT_ALLOW",
+                  "excludes" : {},
+                  "names" : [
+                    "",
+                    "access",
+                    "arch_prctl",
+                    "brk",
+                    "capset",
+                    "chdir",
+                    "clone",
+                    "close",
+                    "dup2",
+                    "execve",
+                    "exit_group",
+                    "fchdir",
+                    "fcntl",
+                    "fstat",
+                    "fstatfs",
+                    "getcwd",
+                    "getdents",
+                    "getdents64",
+                    "getegid",
+                    "geteuid",
+                    "getgid",
+                    "getpid",
+                    "getppid",
+                    "getrlimit",
+                    "gettimeofday",
+                    "getuid",
+                    "lseek",
+                    "lstat",
+                    "mmap",
+                    "mount",
+                    "mprotect",
+                    "munmap",
+                    "open",
+                    "openat",
+                    "pivot_root",
+                    "prctl",
+                    "read",
+                    "readlink",
+                    "rt_sigaction",
+                    "rt_sigprocmask",
+                    "rt_sigreturn",
+                    "seccomp",
+                    "select",
+                    "set_robust_list",
+                    "set_tid_address",
+                    "sethostname",
+                    "setpgid",
+                    "setresgid",
+                    "setresuid",
+                    "setsid",
+                    "stat",
+                    "statx",
+                    "sysinfo",
+                    "timer_create",
+                    "timer_settime",
+                    "umask",
+                    "umount2",
+                    "unlink",
+                    "wait4",
+                    "write"
+                  ],
+                  "comment" : "",
+                  "args" : []
+                }
+              ],
+              "architectures" : [
+                "SCMP_ARCH_X86_64"
+              ]
+            }
+        """.trimIndent()
+
+        private fun writeTexFile(latexString: String, texFile: File) {
+            texFile.bufferedWriter(Charsets.UTF_8).use { writer ->
+                with(writer) {
+                    write(PREAMBLE)
+                    newLine()
+                    write(OPENING)
+                    newLine()
+                    write("""\[$latexString\]""")
+                    newLine()
+                    write(ENDING)
+                    newLine()
+                }
+            }
+        }
+    }
 }
 
 class JLaTeXMathGenerator : LatexGenerator {
