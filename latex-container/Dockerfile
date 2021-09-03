@@ -18,6 +18,7 @@ RUN tlmgr install \
     latex-bin \
     siunitx \
     tools \
+    ucs \
     xcolor
 
 FROM alpine:latest
