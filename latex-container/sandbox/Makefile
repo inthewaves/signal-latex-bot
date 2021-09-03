@@ -5,21 +5,18 @@ PODMANFLAGS=--cap-drop all \
 	--read-only \
 	--memory 25m \
 	--cpus 0.25 \
-	--timeout 5 \ # Only supported in Podman 3.3.0+ \
+	--timeout 5 \
 	-v "$(shell pwd):/data"
 
 all: png
 
 png:
 	podman run $(PODMANFLAGS) \
-		--security-opt seccomp="../podmanseccomp-latex.json" \
 		latex-bwrap-minimal \
-		latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex
-
-	podman run $(PODMANFLAGS) \
-		--security-opt seccomp="../podmanseccomp-dvipng.json" \
+		/bin/bwrap-latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex \
+	&& podman run $(PODMANFLAGS) \
 		latex-bwrap-minimal \
-		dvipng -D 800 -T tight eqn.dvi -o eqn.png
+		/bin/bwrap-dvipng -D 800 -T tight eqn.dvi -o eqn.png
 
 # Generated from these steps (on Fedora 33):
 #
@@ -32,9 +29,8 @@ container_seccomp_json:
 	podman run $(PODMANFLAGS) \
 		--annotation io.containers.trace-syscall="of:$(shell pwd)/podmanseccomp-bwrap-latex.json" \
 		latex-bwrap-minimal \
-		latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex
-
-	podman run $(PODMANFLAGS) \
+		latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex \
+	&& podman run $(PODMANFLAGS) \
 		--annotation io.containers.trace-syscall="of:$(shell pwd)/podmanseccomp-bwrap-dvipng.json" \
 		latex-bwrap-minimal \
 		dvipng -D 800 -T tight eqn.dvi -o eqn.png
