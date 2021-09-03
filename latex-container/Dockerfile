@@ -1,16 +1,16 @@
 FROM alpine:latest AS builder
 RUN apk update && apk add --no-cache \
-    build-base\
+#    build-base\
     curl \
     gnupg \
-    libseccomp-dev \
+#    libseccomp-dev \
     perl \
     wget
 
-FROM builder AS build_seccomp
-WORKDIR /opt/seccompfilters/
-COPY seccompgen/seccompgen.c seccompgen/Makefile ./
-RUN make
+#FROM builder AS build_seccomp
+#WORKDIR /opt/seccompfilters/
+#COPY seccompgen/seccompgen.c seccompgen/Makefile ./
+#RUN make
 
 FROM builder AS build_texlive
 RUN addgroup latex && adduser latex -G latex -D
@@ -31,16 +31,22 @@ RUN tlmgr install \
     xcolor
 
 FROM alpine:latest
-RUN apk update && apk add --no-cache \
-    bash \
-    bubblewrap
-RUN addgroup latex && adduser latex -G latex -D
 COPY --from=build_texlive /usr/local/texlive /usr/local/texlive
-WORKDIR /opt/seccompfilters/
-COPY --from=build_seccomp /opt/seccompfilters/*.bpf .
-COPY bwrap-dvipng bwrap-latex bwrap-dvipng /bin/
-RUN chmod +x /bin/bwrap-dvipng /bin/bwrap-latex
+
+# TODO: Figure out nested how to use bwrap in the container when we have the podmanseccomp-{latex,dvipng}.json files
+#  applied as the seccomp filter for the entire container. Is this possible, or should we use the default seccomp filter
+#  for the container and use the seccomp filters in the bwrap- executables themselves?
+
+#RUN apk update && apk add --no-cache \
+#    bash \
+#    bubblewrap
+#WORKDIR /opt/seccompfilters/
+#COPY --from=build_seccomp /opt/seccompfilters/*.bpf .
+#COPY bwrap-dvipng bwrap-latex bwrap-dvipng /bin/
+#RUN chmod +x /bin/bwrap-dvipng /bin/bwrap-latex
+
 WORKDIR /data/
+RUN addgroup latex && adduser latex -G latex -D
 RUN chown -R latex /data/
 USER latex
 ENV PATH=/usr/local/texlive/2021/bin/x86_64-linuxmusl:$PATH
