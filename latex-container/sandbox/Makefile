@@ -12,9 +12,11 @@ all: png
 
 png:
 	podman run $(PODMANFLAGS) \
+		--security-opt seccomp="../podmanseccomp-latex.json" \
 		latex-bwrap-minimal \
 		/bin/bwrap-latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex \
 	&& podman run $(PODMANFLAGS) \
+		--security-opt seccomp="../podmanseccomp-dvipng.json" \
 		latex-bwrap-minimal \
 		/bin/bwrap-dvipng -D 800 -T tight eqn.dvi -o eqn.png
 
@@ -29,11 +31,11 @@ container_seccomp_json:
 	podman run $(PODMANFLAGS) \
 		--annotation io.containers.trace-syscall="of:$(shell pwd)/podmanseccomp-bwrap-latex.json" \
 		latex-bwrap-minimal \
-		latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex \
+		/bin/bwrap-latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex \
 	&& podman run $(PODMANFLAGS) \
 		--annotation io.containers.trace-syscall="of:$(shell pwd)/podmanseccomp-bwrap-dvipng.json" \
 		latex-bwrap-minimal \
-		dvipng -D 800 -T tight eqn.dvi -o eqn.png
+		/bin/bwrap-dvipng -D 800 -T tight eqn.dvi -o eqn.png
 
 clean:
 	rm -f eqn.aux eqn.dvi eqn.log eqn.png

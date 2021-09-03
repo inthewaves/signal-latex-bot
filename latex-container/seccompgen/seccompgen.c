@@ -15,22 +15,27 @@ struct SYS_CALL {
 static int NOT_END = 0;
 
 /**
- * Derived from the JSON
- * From eqn.tex:
+ * These are syscalls that bwrap uses, derived from manual testing.
+ */
+struct SYS_CALL allowed_bwrap_syscalls[] = {
+    { SCMP_SYS(exit_group), &NOT_END }, // without this, bwrap-latex and bwrap-dvipng will hang forever
+    { SCMP_SYS(wait4), &NOT_END } // without this, bwrap-latex and bwrap-dvipng will fail
+};
+
+/**
+ * allowed_latex_syscalls and allowed_dvipng_syscalls are generated as follows:
  *
- *    \documentclass[12pt]{article}
- *    \usepackage{amsmath, amssymb, amsfonts}
- *    \usepackage{siunitx}
- *    \usepackage{xcolor}
- *    \usepackage[utf8x]{inputenc}
- *    \thispagestyle{empty}
- *    \begin{document}
- *    $$ f(x) = x^2 $$
- *    \end{document}
+ * Inside of the container with --privileged (also modify Dockerfile so that the user is root), run this in
+ * latex-container/sandbox:
  *
- * Run
+ *     podman run -it --privileged --rm -v "$PWD:/data" latex-bwrap-minimal /bin/bash
  *
+ *  Use the results of
+ *
+ *     apk add --no-cache strace
  *     strace -c -S name latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex
+ *     strace -c -S name dvipng -D 800 -T tight eqn.dvi -o eqn.png
+ *
  */
 struct SYS_CALL allowed_latex_syscalls[] = {
     { SCMP_SYS(access), &NOT_END },
@@ -58,7 +63,7 @@ struct SYS_CALL allowed_latex_syscalls[] = {
     { SCMP_SYS(stat), &NOT_END },
     { SCMP_SYS(unlink), &NOT_END },
     { SCMP_SYS(writev), &NOT_END },
-    { -1, NULL },
+    { -1, NULL }
 };
 
 struct SYS_CALL allowed_dvipng_syscalls[] = {
@@ -82,7 +87,7 @@ struct SYS_CALL allowed_dvipng_syscalls[] = {
     { SCMP_SYS(set_tid_address), &NOT_END },
     { SCMP_SYS(stat), &NOT_END },
     { SCMP_SYS(writev), &NOT_END },
-    { -1, NULL },
+    { -1, NULL }
 };
 
 int create_seccomp_files(const char *base_rule_name, struct SYS_CALL allowed_sys_calls[])
@@ -108,6 +113,21 @@ int create_seccomp_files(const char *base_rule_name, struct SYS_CALL allowed_sys
         }
         i++;
     }
+
+    i = 0;
+    while (1) {
+        struct SYS_CALL current_bwrap_sys_call = allowed_bwrap_syscalls[i];
+        if (current_bwrap_sys_call.null_if_done == NULL) {
+            break;
+        }
+        ret_code = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, current_bwrap_sys_call.sys_call_value, 0);
+        if (ret_code != 0) {
+            printf("Failed to add bwrap rule %d (%s)\n", i, strerror(-ret_code));
+            goto out;
+        }
+        i++;
+    }
+
     char buf[1000];
     if (snprintf(buf, 1000, "%s.bpf", base_rule_name) < 0) {
         printf("Failed to get bpf filename (%s)\n", strerror(errno));
