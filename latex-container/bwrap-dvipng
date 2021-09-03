@@ -19,6 +19,4 @@ set -euo pipefail
       --chdir /sandbox \
       --new-session \
       --cap-drop all \
-      --seccomp 12 \
-      /bin/dvipng "$@") \
-    12< <(cat /opt/seccompfilters/seccomp-dvipng.bpf)
+      /bin/dvipng "$@")

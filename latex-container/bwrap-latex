@@ -17,5 +17,6 @@ set -euo pipefail
       --unshare-all \
       --die-with-parent \
       --chdir /sandbox \
+      --new-session \
       --cap-drop all \
       /bin/latex "$@") \
