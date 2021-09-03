@@ -36,6 +36,7 @@ import signallatexbot.util.changePosixGroup
 import signallatexbot.util.setPosixPermissions
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.UserPrincipalNotFoundException
@@ -71,6 +72,59 @@ class PodmanTestCommand : CliktCommand(name = "podman-test") {
 
         val generator = PodmanLatexGenerator()
         generator.writeLatexToPng(latexInput, outputFile)
+    }
+}
+
+class BubblewrapTestCommand : CliktCommand(name = "bubblewrap-test") {
+    override fun run() {
+        val script = """
+            #!/usr/bin/env bash
+
+            set -euo pipefail
+            (exec bwrap \
+                  --ro-bind /usr/bin/sh /usr/bin/sh \
+                  --ro-bind /usr/bin/latex /usr/bin/latex \
+                  --ro-bind /usr/bin/dvipng /usr/bin/dvipng \
+                  --ro-bind /usr/share/fonts /usr/share/fonts \
+                  --ro-bind /usr/share/texlive /usr/share/texlive \
+                  --ro-bind /usr/lib /usr/lib \
+                  --ro-bind /usr/lib64 /usr/lib64 \
+                  --ro-bind /var/lib/texmf /var/lib/texmf \
+                  --dir /tmp \
+                  --dir /var \
+                  --setenv openout_any "p" \
+                  --setenv openin_any "p" \
+                  --bind "${'$'}HOME/sandbox" /sandbox \
+                  --symlink usr/lib /lib \
+                  --symlink usr/lib64 /lib64 \
+                  --symlink usr/bin /bin \
+                  --symlink usr/bin /sbin \
+                  --unshare-all \
+                  --die-with-parent \
+                  --seccomp 12 \
+                  --chdir /sandbox \
+                  --new-session \
+                  --cap-drop ALL \
+                  /bin/sh -c "latex -no-shell-escape -interaction=nonstopmode -halt-on-error eqn.tex && dvipng -D 1200 -T tight eqn.dvi -o eqn.png") \
+                12< <(cat ${'$'}HOME/sandbox/latex_seccomp_filter.bpf)
+        """.trimIndent()
+        val scriptFile = Files.createTempFile("bubblewrap", ".sh").toFile()
+            .apply {
+                writeText(script)
+                setPosixPermissions("r-x------")
+            }
+
+        // val bubblewrapProcess = ProcessBuilder(scriptFile.absolutePath).start()
+        val bubblewrapProcess = ProcessBuilder("/usr/bin/bash", "-c", script).start()
+
+        val input = bubblewrapProcess.inputStream?.bufferedReader()?.readText()
+        val err = bubblewrapProcess.errorStream?.bufferedReader()?.readText()
+        println("stdout: $input")
+        println("stderr: $err")
+        bubblewrapProcess.waitFor()
+        println("Exit code: ${bubblewrapProcess.exitValue()}")
+
+        exitProcess(bubblewrapProcess.exitValue())
     }
 }
 
@@ -446,7 +500,8 @@ fun main(args: Array<String>) {
             UpdateProfileCommand(),
             UpdateConfigCommand(),
             DecryptHistoryCommand(),
-            PodmanTestCommand()
+            PodmanTestCommand(),
+            BubblewrapTestCommand()
         )
         .main(args)
 }

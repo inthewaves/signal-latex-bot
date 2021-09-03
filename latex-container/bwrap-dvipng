@@ -18,5 +18,7 @@ set -euo pipefail
       --die-with-parent \
       --chdir /sandbox \
       --new-session \
-      --cap-drop ALL \
-      /bin/dvipng "$@")
+      --cap-drop all \
+      --seccomp 12 \
+      /bin/dvipng "$@") \
+    12< <(cat /opt/seccompfilters/seccomp-dvipng.bpf)
