@@ -2,6 +2,7 @@ package signallatexbot.core
 
 import org.scilab.forge.jlatexmath.TeXConstants
 import org.scilab.forge.jlatexmath.TeXFormula
+import signallatexbot.util.SemVer
 import java.awt.AlphaComposite
 import java.awt.Color
 import java.awt.Insets
@@ -9,6 +10,7 @@ import java.awt.image.BufferedImage
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 import javax.imageio.IIOImage
 import javax.imageio.ImageIO
 import javax.imageio.ImageTypeSpecifier
@@ -28,6 +30,23 @@ interface LatexGenerator {
 }
 
 class PodmanLatexGenerator : LatexGenerator {
+    init {
+        val podmanVersionProcess = ProcessBuilder("podman", "--version", "-f", "{{.Client.Version}}").start()
+        val versionText = podmanVersionProcess.inputStream?.bufferedReader()?.use { it.readText() }
+        if (!podmanVersionProcess.waitFor(1L, TimeUnit.SECONDS)) {
+            error("took too long to get Podman version")
+        }
+        if (podmanVersionProcess.exitValue() != 0 || versionText == null) {
+            error("failed to get Podman version")
+        }
+
+        val minimumPodmanVersion = SemVer(3, 3, 0)
+        val podmanVersion = SemVer.parse(versionText.trim())
+        require (podmanVersion >= minimumPodmanVersion) {
+            "current Podman version ($podmanVersion) is less than the minimum version ($minimumPodmanVersion)"
+        }
+    }
+
     private val seccompJsonFile = createSeccompFile()
 
     private fun createSeccompFile(): File {
