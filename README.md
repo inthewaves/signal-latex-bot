@@ -28,6 +28,25 @@ apt -t buster-backports install -y libseccomp2
 apt install -y podman openjdk-11-jre signald
 ```
 
+For Ubuntu 20.04:
+
+```bash
+echo 'deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/testing/xUbuntu_20.04/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:testing.list
+curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/testing/xUbuntu_20.04/Release.key | apt-key add
+echo "deb https://updates.signald.org unstable main" > /etc/apt/sources.list.d/signald.list
+curl https://updates.signald.org/apt-signing-key.asc | apt-key add -
+apt update && apt -y install podman openjdk-11-jre signald
+```
+
+As per https://github.com/containers/podman/issues/6365#issuecomment-633067487, Podman containers won't support memory
+limiting without add the following in `/etc/default/grub`
+
+```bash
+GRUB_CMDLINE_LINUX="cgroup_enable=memory swapaccount=1"
+```
+
+After editing, run `update-grub2` as root and reboot.
+
 For other distributions, refer to https://build.opensuse.org/package/show/devel:kubic:libcontainers:testing/podman, or
 monitor https://build.opensuse.org/project/show/devel:kubic:libcontainers:stable to see when version >= 3.3.0 will be
 available.
