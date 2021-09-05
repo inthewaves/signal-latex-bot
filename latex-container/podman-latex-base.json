@@ -6,6 +6,29 @@
     "syscalls": [
         {
             "names": [
+                "bind",
+                "exit",
+                "lstat",
+                "madvise",
+                "mkdir",
+                "readlinkat",
+                "readv",
+                "reboot",
+                "recvfrom",
+                "sendto",
+                "setsockopt",
+                "socket",
+                "symlink",
+                "writev"
+            ],
+            "action": "SCMP_ACT_ALLOW",
+            "args": [],
+            "comment": "From manual adjustment to allow bwrap to function in the container",
+            "includes": {},
+            "excludes": {}
+        },
+        {
+            "names": [
                 "access",
                 "arch_prctl",
                 "brk",
@@ -19,8 +42,6 @@
                 "eventfd2",
                 "execve",
                 "exit_group",
-                "faccessat",
-                "faccessat2",
                 "fchdir",
                 "fcntl",
                 "fork",
@@ -60,7 +81,6 @@
                 "sendfile",
                 "set_tid_address",
                 "setgid",
-                "sethostname",
                 "setresgid",
                 "setresuid",
                 "setsid",
@@ -76,30 +96,7 @@
             ],
             "action": "SCMP_ACT_ALLOW",
             "args": [],
-            "comment": "Generated from the resulting podmanseccomp-dvipng.json from sudo make container_seccomp_json",
-            "includes": {},
-            "excludes": {}
-        },
-        {
-            "names": [
-                "bind",
-                "exit",
-                "lstat",
-                "madvise",
-                "mkdir",
-                "readlinkat",
-                "readv",
-                "reboot",
-                "recvfrom",
-                "sendto",
-                "setsockopt",
-                "socket",
-                "symlink",
-                "writev"
-            ],
-            "action": "SCMP_ACT_ALLOW",
-            "args": [],
-            "comment": "From manual adjustment to allow bwrap to function in the container",
+            "comment": "Generated from 5.4.136-1.fc25.qubes.x86_64",
             "includes": {},
             "excludes": {}
         }

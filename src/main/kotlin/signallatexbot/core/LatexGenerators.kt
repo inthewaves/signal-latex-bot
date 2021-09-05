@@ -144,7 +144,7 @@ class PodmanLatexGenerator : LatexGenerator {
             echo 'openout_any = p\nopenin_any = p' > /tmp/texmf.cnf
             export TEXMFCNF='/tmp:'
             # Compile .tex file to .dvi file. Timeout kills it after 5 seconds if held up
-            timeout 5 latex -no-shell-escape -interaction=nonstopmode -halt-on-error $BASE_TEX_FILENAME
+            timeout 5 latex -no-shell-escape -no-parse-first-line -interaction=nonstopmode -halt-on-error $BASE_TEX_FILENAME
             dvipng -D 800 -T tight $BASE_DVI_FILENAME -o $BASE_PNG_FILENAME
         """.trimIndent()
 

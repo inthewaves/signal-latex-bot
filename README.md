@@ -28,7 +28,7 @@ apt -t buster-backports install -y libseccomp2
 apt install -y podman openjdk-11-jre signald
 ```
 
-For Ubuntu 20.04:
+For Ubuntu 20.04.3 LTS (GNU/Linux 5.11.0-1016-aws x86_64):
 
 ```bash
 echo 'deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/testing/xUbuntu_20.04/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:testing.list

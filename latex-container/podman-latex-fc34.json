@@ -6,6 +6,29 @@
     "syscalls": [
         {
             "names": [
+                "bind",
+                "exit",
+                "lstat",
+                "madvise",
+                "mkdir",
+                "readlinkat",
+                "readv",
+                "reboot",
+                "recvfrom",
+                "sendto",
+                "setsockopt",
+                "socket",
+                "symlink",
+                "writev"
+            ],
+            "action": "SCMP_ACT_ALLOW",
+            "args": [],
+            "comment": "From manual adjustment to allow bwrap to function in the container",
+            "includes": {},
+            "excludes": {}
+        },
+        {
+            "names": [
                 "access",
                 "arch_prctl",
                 "brk",
@@ -73,30 +96,17 @@
             ],
             "action": "SCMP_ACT_ALLOW",
             "args": [],
-            "comment": "Generated from the resulting podmanseccomp-latex.json from sudo make container_seccomp_json",
+            "comment": "Generated from 5.4.136-1.fc25.qubes.x86_64",
             "includes": {},
             "excludes": {}
         },
         {
             "names": [
-                "bind",
-                "exit",
-                "lstat",
-                "madvise",
-                "mkdir",
-                "readlinkat",
-                "readv",
-                "reboot",
-                "recvfrom",
-                "sendto",
-                "setsockopt",
-                "socket",
-                "symlink",
-                "writev"
+                "pselect6"
             ],
             "action": "SCMP_ACT_ALLOW",
             "args": [],
-            "comment": "From manual adjustment to allow bwrap to function in the container",
+            "comment": "Generated from 5.13.13-200.fc34.x86_64",
             "includes": {},
             "excludes": {}
         }
