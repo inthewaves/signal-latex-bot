@@ -31,13 +31,20 @@ interface LatexGenerator {
 
 class PodmanLatexGenerator : LatexGenerator {
     init {
-        val podmanVersionProcess = ProcessBuilder("podman", "--version", "-f", "{{.Client.Version}}").start()
+        val podmanVersionProcess = ProcessBuilder(
+            "podman", "--log-level", "debug",  "version", "-f", "{{.Client.Version}}"
+        ).start()
         val versionText = podmanVersionProcess.inputStream?.bufferedReader()?.use { it.readText() }
         if (!podmanVersionProcess.waitFor(1L, TimeUnit.SECONDS)) {
             error("took too long to get Podman version")
         }
         if (podmanVersionProcess.exitValue() != 0 || versionText == null) {
-            error("failed to get Podman version")
+            val error = try {
+                podmanVersionProcess.errorStream?.bufferedReader()?.use { it.readText() }
+            } catch (e: IOException) {
+                null
+            }
+            error("failed to get Podman version: exit value ${podmanVersionProcess.exitValue()}, error: $error, stdout: $versionText")
         }
 
         val minimumPodmanVersion = SemVer(3, 3, 0)
@@ -55,11 +62,15 @@ class PodmanLatexGenerator : LatexGenerator {
             .apply {
                 deleteOnExit()
                 // setPosixPermissions("r--r--r--")
-                writeText(LATEX_SECCOMP)
+                // writeText(LATEX_SECCOMP)
             }
     }
 
     override fun writeLatexToPng(latexString: String, outputFile: File) {
+        if (BLOCKED.containsMatchIn(latexString)) {
+            println("warning: blocked string detected")
+        }
+
         val tempTexDir = Files.createTempDirectory("temp-test-${System.currentTimeMillis()}")
             .toFile()
             .apply {
@@ -71,32 +82,59 @@ class PodmanLatexGenerator : LatexGenerator {
             writeTexFile(latexString, tempTexFile)
 
             val seccompFileToUse = seccompJsonFile.takeIf { it.canRead() } ?: createSeccompFile()
-            val process = ProcessBuilder(
-                "podman", "run",
+            val latexProcessBuilder = ProcessBuilder(
+                "podman", "--log-level", "debug", "run",
                 "--cap-drop", "all",
                 "--net", "none",
-                "--security-opt", "seccomp=${seccompFileToUse.absolutePath}",
+                "--userns", "keep-id",
+                //"--security-opt", "seccomp=/opt/signallatexbot/latex-sandbox/podman-latex.json",
+                "--security-opt", "label=$SELINUX_LABEL",
                 "--rm",
                 "--read-only",
                 "--memory", "${MAX_MEMORY_MEGABYTES}m",
-                "--name", "LOL",
                 "--cpus", "0.25",
                 "--timeout", "5",
                 "-v", "${tempTexDir.absolutePath}:/data",
                 IMAGE_NAME,
-                "/bin/sh", "-c", LATEX_COMMAND
-            ).start()
-            process.waitFor()
-            val output = process.inputStream?.bufferedReader()?.use { it.readText() }
-            val stdErrOutput = process.errorStream?.bufferedReader()?.use { it.readText() }
+                "/bin/bwrap-latex", "-no-shell-escape", "-no-parse-first-line", "-interaction=nonstopmode",
+                "-halt-on-error", tempTexFile.name
+            )
+            val latexProcess = latexProcessBuilder.start()
+            latexProcess.waitFor()
+            val output = latexProcess.inputStream?.bufferedReader()?.use { it.readText() }
+            val stdErrOutput = latexProcess.errorStream?.bufferedReader()?.use { it.readText() }
             println("Output: $output")
             println("StdErr: $stdErrOutput")
-            if (process.exitValue() != 0) {
-                throw IOException("non-successful exit value: ${process.exitValue()}")
+            if (latexProcess.exitValue() != 0) {
+                throw IOException("non-successful exit value: ${latexProcess.exitValue()}. Command is [${latexProcessBuilder.command().joinToString(" ")}]")
             }
-            tempTexDir.walkTopDown().forEach {
-                println("$it")
+            tempTexDir.walkTopDown().forEach { println("$it") }
+
+            val dvipngProcess = ProcessBuilder(
+                "podman", "--log-level", "debug", "run",
+                "--cap-drop", "all",
+                "--net", "none",
+                "--userns", "keep-id",
+                //"--security-opt", "seccomp=/opt/signallatexbot/latex-sandbox/podman-dvipng.json",
+                "--security-opt", "label=$SELINUX_LABEL",
+                "--rm",
+                "--read-only",
+                "--memory", "${MAX_MEMORY_MEGABYTES}m",
+                "--cpus", "0.25",
+                "--timeout", "5",
+                "-v", "${tempTexDir.absolutePath}:/data",
+                IMAGE_NAME,
+                "/bin/bwrap-dvipng", "-D", "800", "-T", "tight", BASE_DVI_FILENAME, "-o", BASE_PNG_FILENAME
+            ).start()
+            dvipngProcess.waitFor()
+            val outputDvi = dvipngProcess.inputStream?.bufferedReader()?.use { it.readText() }
+            val errDvi = dvipngProcess.errorStream?.bufferedReader()?.use { it.readText() }
+            println("Output for dvipng: $outputDvi")
+            println("StdErr for dvipng: $errDvi")
+            if (dvipngProcess.exitValue() != 0) {
+                throw IOException("non-successful exit value for dvipng: ${dvipngProcess.exitValue()}")
             }
+            tempTexDir.walkTopDown().forEach { println("$it") }
 
             val pngInTmp = File(tempTexDir, BASE_PNG_FILENAME)
             if (!pngInTmp.canRead()) {
@@ -104,7 +142,7 @@ class PodmanLatexGenerator : LatexGenerator {
             }
             pngInTmp.copyTo(outputFile, overwrite = true)
         } finally {
-            tempTexDir.deleteRecursively()
+            // tempTexDir.deleteRecursively()
         }
     }
 
@@ -130,11 +168,12 @@ class PodmanLatexGenerator : LatexGenerator {
         """.trimIndent()
         private const val OPENING = """\begin{document}"""
         private const val ENDING = """\end{document}"""
-        private const val IMAGE_NAME = "docker.io/blang/latex:ubuntu"
+        private const val IMAGE_NAME = "localhost/latex-bwrap-minimal"
         private const val BASE_FILENAME = "eqn"
         private const val BASE_TEX_FILENAME = "$BASE_FILENAME.tex"
         private const val BASE_DVI_FILENAME = "$BASE_FILENAME.dvi"
         private const val BASE_PNG_FILENAME = "$BASE_FILENAME.png"
+        private const val SELINUX_LABEL = "type:latex_container.process"
 
         private const val MAX_MEMORY_MEGABYTES = 100
 
@@ -148,97 +187,8 @@ class PodmanLatexGenerator : LatexGenerator {
             dvipng -D 800 -T tight $BASE_DVI_FILENAME -o $BASE_PNG_FILENAME
         """.trimIndent()
 
-        /**
-         * Generated from these steps (on Fedora 33):
-         *
-         *     $ curl -O https://kojipkgs.fedoraproject.org//packages/oci-seccomp-bpf-hook/1.2.3/1.fc33/x86_64/oci-seccomp-bpf-hook-1.2.3-1.fc33.x86_64.rpm
-         *     $ sudo dnf install oci-seccomp-bpf-hook-1.2.3-1.fc33.x86_64.rpm
-         *     $ sudo podman run --annotation io.containers.trace-syscall="of:$PWD/latexseccomp.json" \
-         *           --net none \
-         *           -v $HOME/sandbox:/data \
-         *           "docker.io/blang/latex:ubuntu" /bin/sh -c "$containerCmds"
-         *
-         * More information: [https://www.redhat.com/sysadmin/container-security-seccomp]
-         */
-        private val LATEX_SECCOMP = """
-            {
-              "defaultAction" : "SCMP_ACT_ERRNO",
-              "syscalls" : [
-                {
-                  "includes" : {},
-                  "action" : "SCMP_ACT_ALLOW",
-                  "excludes" : {},
-                  "names" : [
-                    "",
-                    "access",
-                    "arch_prctl",
-                    "brk",
-                    "capset",
-                    "chdir",
-                    "clone",
-                    "close",
-                    "dup2",
-                    "execve",
-                    "exit_group",
-                    "fchdir",
-                    "fcntl",
-                    "fstat",
-                    "fstatfs",
-                    "getcwd",
-                    "getdents",
-                    "getdents64",
-                    "getegid",
-                    "geteuid",
-                    "getgid",
-                    "getpid",
-                    "getppid",
-                    "getrlimit",
-                    "gettimeofday",
-                    "getuid",
-                    "lseek",
-                    "lstat",
-                    "mmap",
-                    "mount",
-                    "mprotect",
-                    "munmap",
-                    "open",
-                    "openat",
-                    "pivot_root",
-                    "prctl",
-                    "read",
-                    "readlink",
-                    "rt_sigaction",
-                    "rt_sigprocmask",
-                    "rt_sigreturn",
-                    "seccomp",
-                    "select",
-                    "set_robust_list",
-                    "set_tid_address",
-                    "sethostname",
-                    "setpgid",
-                    "setresgid",
-                    "setresuid",
-                    "setsid",
-                    "stat",
-                    "statx",
-                    "sysinfo",
-                    "timer_create",
-                    "timer_settime",
-                    "umask",
-                    "umount2",
-                    "unlink",
-                    "wait4",
-                    "write"
-                  ],
-                  "comment" : "",
-                  "args" : []
-                }
-              ],
-              "architectures" : [
-                "SCMP_ARCH_X86_64"
-              ]
-            }
-        """.trimIndent()
+        private const val LATEX_SECCOMP_PATH = "/opt/signallatexbot/podman-latex.json"
+        private const val DVIPNG_SECCOMP_PATH = "/opt/signallatexbot/podman-dvipng.json"
 
         private fun writeTexFile(latexString: String, texFile: File) {
             texFile.bufferedWriter(Charsets.UTF_8).use { writer ->

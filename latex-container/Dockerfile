@@ -13,7 +13,6 @@ COPY seccompgen/seccompgen.c seccompgen/Makefile ./
 RUN make
 
 FROM builder AS build_texlive
-RUN addgroup latex && adduser latex -G latex -D
 WORKDIR /tmp/install-texlive
 COPY texlive.profile ./
 RUN curl -SL ftp://tug.org/historic/systems/texlive/2021/install-tl-unx.tar.gz \

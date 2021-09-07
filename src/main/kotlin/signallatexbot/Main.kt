@@ -24,7 +24,6 @@ import org.inthewaves.kotlinsignald.Signal
 import org.inthewaves.kotlinsignald.SocketUnavailableException
 import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import signallatexbot.core.BotConfig
-import signallatexbot.core.JLaTeXMathGenerator
 import signallatexbot.core.MessageProcessor
 import signallatexbot.core.PodmanLatexGenerator
 import signallatexbot.db.executeAsSequence
@@ -39,7 +38,6 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
-import java.nio.file.attribute.UserPrincipalNotFoundException
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.TimeUnit
@@ -182,7 +180,9 @@ abstract class BaseSignaldCommand(name: String? = null, help: String = "") : Cli
             try {
                 return Signal(accountId = accountId, socketPath = socketPath)
             } catch (e: IOException) {
-                System.err.print("error connecting to signald socket (${e::class.java.simpleName}): ${e.message}")
+                System.err.println(
+                    "error connecting to signald socket: ${e.stackTraceToString()}"
+                )
                 if (socketConnectRetries <= 0 || retryCount > socketConnectRetries) {
                     throw e
                 }
@@ -456,14 +456,6 @@ class UpdateProfileCommand : BaseSignaldCommand(name = "update-profile", help = 
 class RunCommand : BaseSignaldCommand(name = "run", help = "Runs the bot") {
     override fun runAfterSignaldCheck(botConfig: BotConfig, signal: Signal) {
         val outputDirectory = File(botConfig.outputPhotoDirectory)
-            .apply { setPosixPermissions("rwxr-x---") }
-
-        try {
-            outputDirectory.changePosixGroup("signald")
-        } catch (e: UserPrincipalNotFoundException) {
-            println("unable to find UNIX group signald")
-            exitProcess(1)
-        }
 
         val localAccountAddress = signal.accountInfo?.address
             ?: run {
@@ -474,6 +466,16 @@ class RunCommand : BaseSignaldCommand(name = "run", help = "Runs the bot") {
         val profile = signal.getProfile(address = localAccountAddress)
         println("Current profile for the bot is $profile --- use the update-profile command if it needs updating")
 
+        println("Creating PodmanLatexGenerator and checking a test example")
+        val latexGenerator = PodmanLatexGenerator()
+        val tempFile = Files.createTempFile("test-file", null).toFile()
+            .apply { deleteOnExit() }
+        try {
+            latexGenerator.writeLatexToPng("f(x) = x^2", tempFile)
+        } finally {
+            tempFile.delete()
+        }
+
         println("Starting bot")
         runBlocking {
             withDatabase { database ->
@@ -481,11 +483,10 @@ class RunCommand : BaseSignaldCommand(name = "run", help = "Runs the bot") {
                     signal = signal,
                     outputPhotoDir = outputDirectory,
                     botConfig = botConfig,
-                    latexGenerator = JLaTeXMathGenerator(),
+                    latexGenerator = PodmanLatexGenerator(),
                     database = database
                 ).use { messageProcessor -> messageProcessor.runProcessor() }
             }
-
         }
     }
 

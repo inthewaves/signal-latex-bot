@@ -9,6 +9,66 @@ Try it out by messaging +14046091473 on Signal.
 
 ### Installation
 
+These are instructions for a Fedora 34 server installation.
+
+First, on your local machine, clone this repository.
+
+Then, on the server, install dependencies for running the bot:
+
+```bash
+dnf update
+dnf install -y podman java-11-openjdk policycoreutils-python-utils
+```
+
+### Setting up signald
+
+If you already have signald setup on your Fedora 34 server, you can skip this section.
+
+Setup the signald user (`#` indicates running as root; `$` indicates running as the signald user). Parts of this were
+taken from
+https://blog.christophersmart.com/2021/02/20/rootless-podman-containers-under-system-accounts-managed-and-enabled-at-boot-with-systemd/:
+
+```
+# useradd -r -m -s /bin/bash -b /var/lib signald
+# su - signald -c "mkdir -m 755 ~/data"
+# su - signald -c "mkdir -m 755 ~/uploads"
+# loginctl enable-linger signald
+# semanage fcontext --add --type user_home_dir_t "/var/lib/signald(/.+)?"
+# semanage fcontext --add --type container_file_t "/var/lib/signald/data(/.+)?"
+# semanage fcontext --add --type container_file_t "/var/lib/signald/uploads(/.+)?"
+# restorecon -Frv /var/lib/signald/
+# chmod 755 /var/lib/signald/
+# su - signald
+$ podman run -u 0:0 -d --name signald -v /var/lib/signald/data:/signald:z -v /var/lib/signald/uploads:/var/lib/signald/uploads:z signald/signald
+$ mkdir -p ~/.config/systemd/user
+$ podman generate systemd --restart-policy always --name signald > ~/.config/systemd/user/signald.service
+$ export XDG_RUNTIME_DIR=/run/user/"$(id -u)"
+$ systemctl --user daemon-reload
+$ systemctl --user enable --now signald.service
+$ exit
+# ln -s /var/lib/signald/data/signald.sock /var/run/signald
+```
+<!-- Troubleshooting: restorecon -R -v /var/lib/signald/.local/share/containers/ -->
+
+Install signaldctl for root:
+
+```
+curl -Lo /bin/signaldctl https://gitlab.com/api/v4/projects/21018340/jobs/artifacts/main/raw/signaldctl?job=build%3Ax86
+chmod +x /bin/signaldctl
+mkdir -p ~/.config
+```
+
+### Setting up the Signal LaTeX bot user
+
+Setup bot user and uploads directory:
+
+```
+useradd -m -s /bin/bash -b /var/lib signallatexbot
+mkdir -p /opt/signallatexbot/deploy
+su - signald -c "mkdir -m 770 ~/uploads/signallatexbot"
+chgrp signallatexbot /var/lib/signald/uploads/signallatexbot/
+```
+
 These are instructions intended for a Debian 10 installation.
 
 First, on your local machine, clone this repository.
@@ -57,14 +117,14 @@ Register with signald via `signald account register`; you may need to get a capt
 As root on the server, run the following:
 
 ```bash
-useradd -m -s /bin/bash -g signald -b /var/lib signallatexbot
+useradd -m -s /bin/bash -b /var/lib signallatexbot
 mkdir -p /opt/signallatexbot/deploy /opt/signallatexbot/images
 chown signallatexbot /opt/signallatexbot/images
 ```
 
 Then, we will need to generate the bot configuration. On your local machine, build the bot with `./gradlew installDist`.
 After that, run `build/install/signal-latex-bot/bin/signal-latex-bot update-config --local` and follow the prompts. Use
-`/opt/signallatexbot/images` for the output photo directory. Upload the resulting `config.json` file to
+`/var/lib/signald/uploads/signallatexbot/` for the output photo directory. Upload the resulting `config.json` file to
 `/var/lib/signallatexbot` and ensure that it is owned by the `signallatexbot` user.
 
 On your local machine, add an `.env` file in the root of this repo containing the following:

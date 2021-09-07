@@ -25,7 +25,7 @@ semodule -i latex_container.cil base_container.cil
 Then, generate seccomp filters for the container based on the current system, using the base filters
 (`podman-{latex,dvipng}-base.json`) to create a seccomp filter for the current system.
 
-The hook needs to be installed first. On Fedora 32+, you can run `dnf install -y oci-seccomp-bpf-package`. For other
+The hook needs to be installed first. On Fedora 32+, you can run `dnf install -y oci-seccomp-bpf-hook`. For other
 distributions, you can try building from source (instructions at
 https://www.redhat.com/sysadmin/container-security-seccomp). After the hook is installed, the following commands should
 be run as root:
@@ -37,7 +37,28 @@ make container_seccomp_json
 setenforce 1
 ```
 
-Check that `podman-latex.json` and `podman-dvipng.json` exist.
+If you see an error involving "CPU", follow these steps:
+https://github.com/containers/podman/blob/84694170402ff699065382ba2d2fb172c3b6c88f/troubleshooting.md. It comes down to
+
+> You can verify whether CPU limit delegation is enabled by running the following command:
+>
+>     cat "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers"
+> 
+> Example output might be:
+>
+>     memory pids
+> 
+> In the above example, `cpu` is not listed, which means the current user does not have permission to set CPU limits.
+> 
+> If you want to enable CPU limit delegation for all users, you can create the file
+> `/etc/systemd/system/user@.service.d/delegate.conf` with the contents:
+> 
+>     [Service]
+>     Delegate=memory pids cpu io
+> 
+> After logging out and logging back in, you should have permission to set CPU limits.
+
+Check that `podman-latex.json` and `podman-dvipng.json` exist in the  `latex-sandbox` directory.
 
 Remove the leftover container with `podman ps --all` to find it and `podman rm ID` to remove it.
 
@@ -106,4 +127,5 @@ the Git repository.
 
 ### Useful troubleshooting
 
+* `dnf install policycoreutils-python-utils` for `semanage`, `audit2why`, etc.
 * https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/8/html/using_selinux/troubleshooting-problems-related-to-selinux_using-selinux

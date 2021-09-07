@@ -45,7 +45,6 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import java.util.concurrent.CancellationException
@@ -458,7 +457,12 @@ class MessageProcessor(
                             ) {
                                 latexImageFile
                                     .also { outFile -> latexGenerator.writeLatexToPng(latexBodyInput, outFile) }
-                                    .apply { addPosixPermissions(PosixFilePermission.GROUP_READ) }
+                                    .apply {
+                                        addPosixPermissions(
+                                            PosixFilePermission.GROUP_READ,
+                                            PosixFilePermission.OTHERS_READ
+                                        )
+                                    }
                                     .absolutePath
                             }
                         }.also { println("LaTeX request $requestId took ${genMark.elapsedNow()}") }
@@ -874,7 +878,7 @@ class MessageProcessor(
         } finally {
             if (reply is Reply.LatexReply) {
                 try {
-                    Files.deleteIfExists(Paths.get(reply.latexImagePath))
+                    // Files.deleteIfExists(Paths.get(reply.latexImagePath))
                 } catch (e: IOException) {
                     System.err.println("failed to delete image for request ${reply.requestId}")
                 }

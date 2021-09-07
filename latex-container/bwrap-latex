@@ -18,7 +18,6 @@ set -euo pipefail
       --die-with-parent \
       --chdir /sandbox \
       --new-session \
-      --cap-drop all \
       --seccomp 12 \
       /bin/latex "$@") \
     12< <(cat /opt/seccompfilters/seccomp-latex.bpf)

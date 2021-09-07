@@ -1,5 +1,4 @@
-PODMANFLAGS=--cap-drop all \
-	--net none \
+PODMANFLAGS=--net none \
 	--userns=keep-id \
 	--read-only \
 	--memory 25m \
@@ -15,23 +14,29 @@ all: png
 
 png:
 	podman run $(PODMANFLAGS) \
+		--cap-drop all \
 		--rm \
 		--security-opt seccomp="../podman-latex.json" \
 		latex-bwrap-minimal \
 		/bin/bwrap-latex $(LATEXOPTS) \
 	&& podman run $(PODMANFLAGS) \
+		--cap-drop all \
 		--rm \
 		--security-opt seccomp="../podman-dvipng.json" \
 		latex-bwrap-minimal \
 		/bin/bwrap-dvipng $(DVIPNGOPTS)
 
 png_withselinux:
-	podman run $(PODMANFLAGS) \
+	podman run $(COMMONPODMANOPTS) \
+		--cap-drop all \
+		--rm \
 		--security-opt seccomp="../podman-latex.json" \
 		--security-opt label=type:latex_container.process \
 		latex-bwrap-minimal \
 		/bin/bwrap-latex $(LATEXOPTS) \
-	&& podman run $(PODMANFLAGS) \
+	&& podman run $(COMMONPODMANOPTS) \
+		--cap-drop all \
+		--rm \
 		--security-opt seccomp="../podman-dvipng.json" \
 		--security-opt label=type:latex_container.process \
 		latex-bwrap-minimal \
@@ -39,6 +44,7 @@ png_withselinux:
 
 persistent_container:
 	podman run $(PODMANFLAGS) \
+		--cap-drop all \
 		--detach \
 		--security-opt seccomp="../podman-latex.json" \
 		latex-bwrap-minimal \
