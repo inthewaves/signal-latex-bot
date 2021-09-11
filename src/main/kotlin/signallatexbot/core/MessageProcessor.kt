@@ -48,6 +48,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
+import java.util.UUID
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -131,6 +132,9 @@ class MessageProcessor(
 
     suspend fun runProcessor() {
         val mainJob = processorScope.launch {
+            println("warning up SCrypt")
+            UserIdentifier.create(JsonAddress(uuid = UUID.randomUUID().toString()), identifierHashSalt)
+
             pruneHistory()
             trustAllUntrustedIdentityKeys(bypassTimeCheck = true)
             launch {
