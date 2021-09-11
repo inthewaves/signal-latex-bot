@@ -346,11 +346,14 @@ class MessageProcessor(
         }
 
         launch {
-            val identifier = addressToIdentifierCache.get(source)
-
-            // Force it so that there is only one request per user
-            val userMutex = identifierMutexesMutex.withLock {
-                identifierMutexes.getOrPut(identifier) { Mutex() }
+            // Get the identifier inside the mutex to ensure at most one identifier is generated to prevent out of
+            // memory errors from concurrent SCrypt usage.
+            // We use the userMutex to ensure that there is only one request per user handled at once.
+            val identifier: UserIdentifier
+            val userMutex: Mutex
+            identifierMutexesMutex.withLock {
+                identifier = addressToIdentifierCache.get(source)
+                userMutex = identifierMutexes.getOrPut(identifier) { Mutex() }
             }
             val requestId = RequestId.create(identifier, incomingMessage)
 
