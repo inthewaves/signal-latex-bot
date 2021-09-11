@@ -31,7 +31,6 @@ import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAddress
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
-import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.RemoteDelete
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
@@ -187,11 +186,15 @@ class MessageProcessor(
         mainJob.join()
     }
 
+    /**
+     * A null-safe way of parsing incoming messages. This is also a [CoroutineContext.Element], meaning that the
+     * [errorHandler] can figure out the request type for error logging purposes.
+     */
     sealed interface IncomingMessageType : CoroutineContext.Element {
         @JvmInline
         value class LatexRequestMessage(val latexText: String) : IncomingMessageType
         @JvmInline
-        value class RemoteDeleteMessage(val remoteDelete: RemoteDelete) : IncomingMessageType
+        value class RemoteDeleteMessage(val targetSentTimestamp: Long) : IncomingMessageType
         object InvalidMessage : IncomingMessageType
 
         override val key: CoroutineContext.Key<IncomingMessageType> get() = Companion
@@ -201,8 +204,8 @@ class MessageProcessor(
                 val remoteDelete = incomingMessage.data.dataMessage?.remoteDelete
                 val body = incomingMessage.data.dataMessage?.body
 
-                return if (remoteDelete != null) {
-                    RemoteDeleteMessage(remoteDelete)
+                return if (remoteDelete?.targetSentTimestamp != null) {
+                    RemoteDeleteMessage(remoteDelete.targetSentTimestamp!!)
                 } else if (!body.isNullOrBlank()) {
                     LatexRequestMessage(body)
                 } else {
@@ -215,8 +218,8 @@ class MessageProcessor(
     private val lastTrustAllAttemptTimestamp = AtomicLong(0L)
     private val trustAllMutex = Mutex()
 
-    private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = supervisorScope {
-        trustAllMutex.withLock {
+    private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = trustAllMutex.withLock {
+        supervisorScope {
             if (!bypassTimeCheck) {
                 val now = System.currentTimeMillis()
                 if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
@@ -363,11 +366,7 @@ class MessageProcessor(
                 when (incomingMsgType) {
                     is IncomingMessageType.InvalidMessage -> error("unexpected message type")
                     is IncomingMessageType.RemoteDeleteMessage -> {
-                        val targetTimestamp = incomingMsgType.remoteDelete.targetSentTimestamp
-                        if (targetTimestamp == null) {
-                            println("got remote delete request $requestId, but targetTimestamp is null so rejecting")
-                            return@withLockAndContext
-                        }
+                        val targetTimestamp = incomingMsgType.targetSentTimestamp
 
                         println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
                         delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
@@ -402,7 +401,6 @@ class MessageProcessor(
                     val rateLimitStatus = RateLimitStatus.getStatus(
                         database,
                         identifier,
-                        requestId,
                         incomingMsgType,
                         incomingMessage,
                         secureKotlinRandom
@@ -456,7 +454,7 @@ class MessageProcessor(
                             }
                             return@withLockAndContext
                         }
-                        is RateLimitStatus.SendDelayed -> {
+                        is RateLimitStatus.Allowed -> {
                             sendReadReceipt(source, msgId)
                             sendTypingAfterDelay(replyRecipient)
                             sendDelay = rateLimitStatus.sendDelay
@@ -482,7 +480,7 @@ class MessageProcessor(
                     } catch (e: Exception) {
                         System.err.println("Failed to parse LaTeX for request $requestId: ${e.stackTraceToString()}")
                         latexImageFile.delete()
-                        val errorMsg = if (e is ParseException && !e.message.isNullOrBlank()) {
+                        val errorReplyMessage = if (e is ParseException && !e.message.isNullOrBlank()) {
                             "Failed to parse LaTeX: ${e.message}"
                         } else {
                             "Failed to parse LaTeX: Miscellaneous error"
@@ -495,14 +493,26 @@ class MessageProcessor(
                                 originalMessage = incomingMessage,
                                 delay = sendDelay,
                                 replyTimestamp = replyMessageTimestamp,
-                                errorMessage = errorMsg
+                                errorMessage = errorReplyMessage
                             )
                         )
+                        // propagate coroutine cancellation
                         if (e is CancellationException) throw e
                         return@withLockAndContext
                     }
 
-                    if (latexImagePath == null) {
+                    if (latexImagePath != null) {
+                        sendMessage(
+                            Reply.LatexReply(
+                                requestId = requestId,
+                                replyRecipient = replyRecipient,
+                                originalMessage = incomingMessage,
+                                delay = sendDelay,
+                                replyTimestamp = replyMessageTimestamp,
+                                latexImagePath = latexImagePath
+                            )
+                        )
+                    } else {
                         System.err.println("LaTeX request $requestId timed out")
                         latexImageFile.delete()
                         timedOut = true
@@ -516,32 +526,21 @@ class MessageProcessor(
                                 errorMessage = "Failed to parse LaTeX: Timed out"
                             )
                         )
-                    } else {
-                        sendMessage(
-                            Reply.LatexReply(
-                                requestId = requestId,
-                                replyRecipient = replyRecipient,
-                                originalMessage = incomingMessage,
-                                delay = sendDelay,
-                                replyTimestamp = replyMessageTimestamp,
-                                latexImagePath = latexImagePath
-                            )
-                        )
                     }
                 } finally {
-                    database.requestQueries
-                        .insert(
-                            userId = identifier,
-                            serverReceiveTimestamp = serverReceiveTimestamp,
-                            clientSentTimestamp = msgId,
-                            replyMessageTimestamp = if (sentReply) replyMessageTimestamp else null,
-                            timedOut = timedOut,
-                            latexCiphertext = if (timedOut) {
-                                LatexCiphertext.fromPlaintext(botConfig, incomingMsgType.latexText, identifier)
-                            } else {
-                                null
-                            }
-                        )
+                    database.requestQueries.insert(
+                        userId = identifier,
+                        serverReceiveTimestamp = serverReceiveTimestamp,
+                        clientSentTimestamp = msgId,
+                        replyMessageTimestamp = if (sentReply) replyMessageTimestamp else null,
+                        timedOut = timedOut,
+                        // Encrypt the LaTeX for requests that took too long for abuse monitoring.
+                        latexCiphertext = if (timedOut) {
+                            LatexCiphertext.fromPlaintext(botConfig, incomingMsgType.latexText, identifier)
+                        } else {
+                            null
+                        }
+                    )
                 }
             }
         }
@@ -589,7 +588,7 @@ class MessageProcessor(
         }
 
         @JvmInline
-        value class SendDelayed(val sendDelay: Long) : RateLimitStatus
+        value class Allowed(val sendDelay: Long) : RateLimitStatus
 
         companion object {
             private fun calculateExtraDelayMillis(numEntriesInLastMinute: Long): Long {
@@ -603,7 +602,6 @@ class MessageProcessor(
             fun getStatus(
                 database: BotDatabase,
                 identifier: UserIdentifier,
-                requestId: RequestId,
                 incomingMessageType: IncomingMessageType,
                 incomingMessage: IncomingMessage,
                 secureKotlinRandom: Random
@@ -629,12 +627,6 @@ class MessageProcessor(
                         upperTimestamp = serverReceiveTimestamp
                     ).executeAsOne()
                 }
-
-                println("request $requestId: " +
-                        "entriesWithinLastMinute=$entriesWithinLastMinute, " +
-                        "timedOutEntriesInLastMin=$timedOutEntriesInLastMin, " +
-                        "entriesInLastTwentySeconds=$entriesInLastTwentySeconds"
-                )
 
                 val sendDelayRange: LongRange = if (entriesWithinLastMinute != 0L) {
                     val delayAddition = calculateExtraDelayMillis(entriesWithinLastMinute)
@@ -671,7 +663,7 @@ class MessageProcessor(
                         if (entriesWithinLastMinute >= HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE) {
                             "sent $entriesWithinLastMinute requests within the last minute"
                         } else {
-                            "sent $entriesInLastTwentySeconds requests within the last 10 seconds"
+                            "sent $entriesInLastTwentySeconds requests within the last 20 seconds"
                         }
 
                     // TODO: refactor rate limit intervals, or just do leaky bucket
@@ -713,7 +705,7 @@ class MessageProcessor(
                             return Blocked.WithRejectionReply(sendDelay = sendDelay, reason = "LaTeX is too long")
                         }
                     }
-                    return SendDelayed(sendDelay)
+                    return Allowed(sendDelay)
                 }
             }
         }
