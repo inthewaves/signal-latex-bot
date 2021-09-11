@@ -203,7 +203,7 @@ class MessageProcessor(
 
     private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = supervisorScope {
         trustAllMutex.withLock {
-            if (bypassTimeCheck) {
+            if (!bypassTimeCheck) {
                 val now = System.currentTimeMillis()
                 if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
                     println("Not trusting identity keys --- too early")
