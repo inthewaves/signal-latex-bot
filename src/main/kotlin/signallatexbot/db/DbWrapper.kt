@@ -59,9 +59,14 @@ val SQLITE3_CONFIG: Properties = SQLiteConfig().apply {
     setSynchronous(SQLiteConfig.SynchronousMode.FULL)
 }.toProperties()
 
+class DbWrapper(
+    val db: BotDatabase,
+    val driver: JdbcSqliteDriver
+)
+
 suspend inline fun withDatabase(
     path: String = DEFAULT_DATABASE_PATH,
-    crossinline block: suspend (db: BotDatabase) -> Unit
+    crossinline block: suspend (db: DbWrapper) -> Unit
 ) {
     JdbcSqliteDriver("jdbc:sqlite:$path", SQLITE3_CONFIG).use { driver ->
         migrateIfNeeded(driver)
@@ -73,10 +78,13 @@ suspend inline fun withDatabase(
         }
 
         block(
-            BotDatabase(
-                driver = driver,
-                RequestAdapter = requestsAdapter,
-                UserAdapter = userAdapter
+            DbWrapper(
+                BotDatabase(
+                    driver = driver,
+                    RequestAdapter = requestsAdapter,
+                    UserAdapter = userAdapter
+                ),
+                driver
             )
         )
     }

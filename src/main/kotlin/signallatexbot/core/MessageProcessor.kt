@@ -35,6 +35,7 @@ import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
 import signallatexbot.db.BotDatabase
+import signallatexbot.db.DbWrapper
 import signallatexbot.latexGenerationThreadGroup
 import signallatexbot.model.LatexCiphertext
 import signallatexbot.model.RequestId
@@ -82,7 +83,7 @@ class MessageProcessor(
     private val outputPhotoDir: File,
     private val botConfig: BotConfig,
     private val latexGenerator: LatexGenerator,
-    private val database: BotDatabase
+    private val dbWrapper: DbWrapper
 ) : AutoCloseable {
     private val botAccountInfo: Account = signal.accountInfo ?: error("bot doesn't have account info")
     private val botUuid: String = botAccountInfo.address?.uuid ?: error("bot doesn't have UUID")
@@ -119,12 +120,12 @@ class MessageProcessor(
     }
 
     private val addressToIdentifierCache =
-        AddressIdentifierCache(identifierHashSalt = identifierHashSalt, database = database)
+        AddressIdentifierCache(identifierHashSalt = identifierHashSalt, database = dbWrapper.db)
 
     private val processorScope = CoroutineScope(Dispatchers.IO + errorHandler)
 
     private fun pruneHistory() {
-        database.requestQueries.apply {
+        dbWrapper.db.requestQueries.apply {
             val countBefore = count().executeAsOne()
             deleteEntriesOlderThan(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(MAX_HISTORY_LIFETIME_DAYS))
             val countNow = count().executeAsOne()
@@ -142,6 +143,7 @@ class MessageProcessor(
             launch {
                 while (isActive) {
                     pruneHistory()
+                    dbWrapper.driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
                     delay(HISTORY_PURGE_INTERVAL_MILLIS)
                 }
             }
@@ -160,6 +162,9 @@ class MessageProcessor(
                         }
                         if (anyRemoved) {
                             println("identifierMutexes size is now ${identifierMutexes.size}")
+                            if (identifierMutexes.size == 0) {
+                                dbWrapper.driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
+                            }
                         }
                     }
 
@@ -370,7 +375,7 @@ class MessageProcessor(
 
                         println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
                         delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
-                        val timestampOfOurMsgToDelete = database.requestQueries
+                        val timestampOfOurMsgToDelete = dbWrapper.db.requestQueries
                             .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
                             .executeAsOneOrNull()
                             ?.replyMessageTimestamp
@@ -399,7 +404,7 @@ class MessageProcessor(
                     println("received LaTeX request $requestId")
 
                     val rateLimitStatus = RateLimitStatus.getStatus(
-                        database,
+                        dbWrapper.db,
                         identifier,
                         incomingMsgType,
                         incomingMessage,
@@ -528,7 +533,7 @@ class MessageProcessor(
                         )
                     }
                 } finally {
-                    database.requestQueries.insert(
+                    dbWrapper.db.requestQueries.insert(
                         userId = identifier,
                         serverReceiveTimestamp = serverReceiveTimestamp,
                         clientSentTimestamp = msgId,

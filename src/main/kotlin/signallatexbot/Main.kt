@@ -139,8 +139,8 @@ class DecryptHistoryCommand : CliktCommand(name = "decrypt-history") {
 
         println("Decrypted history for identifier $userId: ")
         runBlocking {
-            withDatabase(path = databasePath.absolutePath) { db ->
-                db.requestQueries
+            withDatabase(path = databasePath.absolutePath) { dbWrapper ->
+                dbWrapper.db.requestQueries
                     .getRequestsWithLatexCiphertext(userId)
                     .executeAsSequence { sequence ->
                         sequence.forEach {
@@ -476,16 +476,15 @@ class RunCommand : BaseSignaldCommand(name = "run", help = "Runs the bot") {
 
         println("Starting bot")
         runBlocking {
-            withDatabase { database ->
+            withDatabase { dbWrapper ->
                 MessageProcessor(
                     signal = signal,
                     outputPhotoDir = outputDirectory,
                     botConfig = botConfig,
                     latexGenerator = JLaTeXMathGenerator(),
-                    database = database
+                    dbWrapper = dbWrapper
                 ).use { messageProcessor -> messageProcessor.runProcessor() }
             }
-
         }
     }
 
