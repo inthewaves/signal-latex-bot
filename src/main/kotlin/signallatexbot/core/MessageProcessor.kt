@@ -25,6 +25,7 @@ import org.inthewaves.kotlinsignald.Signal
 import org.inthewaves.kotlinsignald.TrustLevel
 import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import org.inthewaves.kotlinsignald.clientprotocol.v0.structures.JsonAttachment
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.Account
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAddress
@@ -84,7 +85,8 @@ class MessageProcessor(
     private val latexGenerator: LatexGenerator,
     private val database: BotDatabase
 ) : AutoCloseable {
-    private val botUuid = signal.accountInfo?.address?.uuid ?: error("bot doesn't have UUID")
+    private val botAccountInfo: Account = signal.accountInfo ?: error("bot doesn't have account info")
+    private val botUuid: String = botAccountInfo.address?.uuid ?: error("bot doesn't have UUID")
 
     private val secureRandom = SecureRandom()
     private val secureKotlinRandom = secureRandom.asKotlinRandom()
@@ -282,7 +284,7 @@ class MessageProcessor(
 
     private fun CoroutineScope.handleIncomingMessage(incomingMessage: IncomingMessage) {
         incomingMessage.data.dataMessage?.reaction?.let { jsonReaction ->
-            if (jsonReaction.targetAuthor?.uuid == signal.accountInfo!!.address?.uuid) {
+            if (jsonReaction.targetAuthor?.uuid == botAccountInfo.address?.uuid) {
                 println("got a reaction to our own message")
             }
         }
@@ -314,7 +316,7 @@ class MessageProcessor(
             return
         }
 
-        if (source.uuid == signal.accountInfo?.address?.uuid || source.number == signal.accountInfo?.address?.number) {
+        if (source.uuid == botUuid || source.number == botAccountInfo.address?.number) {
             println("received a message to self ($msgId)")
             return
         }
