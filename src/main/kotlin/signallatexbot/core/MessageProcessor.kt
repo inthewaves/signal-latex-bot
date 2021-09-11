@@ -68,6 +68,7 @@ private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
 private const val LATEX_GENERATION_TIMEOUT_MILLIS = 4000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
+private val HISTORY_PURGE_INTERVAL_MILLIS = TimeUnit.DAYS.toMillis(1)
 private const val MAX_HISTORY_LIFETIME_DAYS = 10L
 private const val MAX_LATEX_BODY_LENGTH_CHARS = 4096
 
@@ -135,8 +136,15 @@ class MessageProcessor(
             println("warning up SCrypt")
             UserIdentifier.create(JsonAddress(uuid = UUID.randomUUID().toString()), identifierHashSalt)
 
-            pruneHistory()
             trustAllUntrustedIdentityKeys(bypassTimeCheck = true)
+
+            launch {
+                while (isActive) {
+                    pruneHistory()
+                    delay(HISTORY_PURGE_INTERVAL_MILLIS)
+                }
+            }
+
             launch {
                 while (isActive) {
                     identifierMutexesMutex.withLock {
