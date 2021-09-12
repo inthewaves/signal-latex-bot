@@ -241,7 +241,7 @@ class PodmanLatexGenerator : LatexGenerator {
 
 class JLaTeXMathGenerator : LatexGenerator {
     private fun calculatePercentage(max: Float): Double = when {
-        max <= 2500f -> 0.01
+        max <= 3000f -> 0.01
         max <= 4000f -> 0.05
         max <= 5000f -> 0.10
         max <= 6000f -> 0.15
@@ -261,7 +261,7 @@ class JLaTeXMathGenerator : LatexGenerator {
                 val useMobileFriendlyInsets = min >= percentage * max
                 println(
                     "Existing insets=$insets, min=$min, max=$max, percentage=$percentage, " +
-                            "useMobileFriendlyInsets=$useMobileFriendlyInsets, " +
+                            "useMobileFriendlyInsets=$min >= ${percentage * max} == ${useMobileFriendlyInsets}, " +
                             "trueIconWidth=$trueIconWidth, trueIconHeight=$trueIconHeight"
                 )
                 insets = if (useMobileFriendlyInsets) {

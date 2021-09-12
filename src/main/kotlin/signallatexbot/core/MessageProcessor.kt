@@ -74,6 +74,7 @@ private val HISTORY_PURGE_INTERVAL_MILLIS = TimeUnit.DAYS.toMillis(1)
 private const val MAX_NON_TIMED_OUT_HISTORY_LIFETIME_DAYS = 1L
 private const val MAX_TIMED_OUT_HISTORY_LIFETIME_DAYS = 10L
 private const val MAX_LATEX_BODY_LENGTH_CHARS = 4096
+private const val MAX_LATEX_IMAGE_SIZE_BYTES = 2_048_576 // 2 MiB
 
 private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE = 15L
 private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4L
@@ -174,6 +175,7 @@ class MessageProcessor(
                                 dbWrapper.driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
                             }
                         }
+                        System.gc()
                     }
 
                     delay(TimeUnit.MINUTES.toMillis(10L))
@@ -515,16 +517,32 @@ class MessageProcessor(
                     }
 
                     if (latexImagePath != null) {
-                        sendMessage(
-                            Reply.LatexReply(
-                                requestId = requestId,
-                                replyRecipient = replyRecipient,
-                                originalMessage = incomingMessage,
-                                delay = sendDelay,
-                                replyTimestamp = replyMessageTimestamp,
-                                latexImagePath = latexImagePath
+                        System.err.println("LaTeX request $requestId has size ${latexImageFile.length()} bytes")
+                        if (latexImageFile.length() <= MAX_LATEX_IMAGE_SIZE_BYTES) {
+                            sendMessage(
+                                Reply.LatexReply(
+                                    requestId = requestId,
+                                    replyRecipient = replyRecipient,
+                                    originalMessage = incomingMessage,
+                                    delay = sendDelay,
+                                    replyTimestamp = replyMessageTimestamp,
+                                    latexImagePath = latexImagePath
+                                )
                             )
-                        )
+                        } else {
+                            System.err.println("LaTeX request $requestId is too large")
+                            latexImageFile.delete()
+                            sendMessage(
+                                Reply.Error(
+                                    requestId = requestId,
+                                    replyRecipient = replyRecipient,
+                                    originalMessage = incomingMessage,
+                                    delay = sendDelay,
+                                    replyTimestamp = replyMessageTimestamp,
+                                    errorMessage = "Failed to parse LaTeX: Resulting image is too large"
+                                )
+                            )
+                        }
                     } else {
                         System.err.println("LaTeX request $requestId timed out")
                         latexImageFile.delete()
