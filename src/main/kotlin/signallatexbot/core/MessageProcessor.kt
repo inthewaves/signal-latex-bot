@@ -69,8 +69,10 @@ private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
 private const val LATEX_GENERATION_TIMEOUT_MILLIS = 4000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
+
 private val HISTORY_PURGE_INTERVAL_MILLIS = TimeUnit.DAYS.toMillis(1)
-private const val MAX_HISTORY_LIFETIME_DAYS = 10L
+private const val MAX_NON_TIMED_OUT_HISTORY_LIFETIME_DAYS = 1L
+private const val MAX_TIMED_OUT_HISTORY_LIFETIME_DAYS = 10L
 private const val MAX_LATEX_BODY_LENGTH_CHARS = 4096
 
 private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE = 15L
@@ -127,7 +129,13 @@ class MessageProcessor(
     private fun pruneHistory() {
         dbWrapper.db.requestQueries.apply {
             val countBefore = count().executeAsOne()
-            deleteEntriesOlderThan(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(MAX_HISTORY_LIFETIME_DAYS))
+            val now = System.currentTimeMillis()
+            deleteNonTimedOutEntriesOlderThan(
+                timestampTarget = now - TimeUnit.DAYS.toMillis(MAX_NON_TIMED_OUT_HISTORY_LIFETIME_DAYS)
+            )
+            deleteTimedOutEntriesOlderThan(
+                timestampTarget = now - TimeUnit.DAYS.toMillis(MAX_TIMED_OUT_HISTORY_LIFETIME_DAYS)
+            )
             val countNow = count().executeAsOne()
             println("pruned ${countBefore - countNow} request history entries")
         }

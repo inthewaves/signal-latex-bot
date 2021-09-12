@@ -31,9 +31,14 @@ SELECT COUNT(*)
 FROM Request
 ;
 
-deleteEntriesOlderThan:
+deleteNonTimedOutEntriesOlderThan:
 DELETE FROM Request
-WHERE serverReceiveTimestamp < :timestampTarget
+WHERE serverReceiveTimestamp < :timestampTarget AND timedOut = 0
+;
+
+deleteTimedOutEntriesOlderThan:
+DELETE FROM Request
+WHERE serverReceiveTimestamp < :timestampTarget AND timedOut = 1
 ;
 
 getRequestsWithLatexCiphertext:
