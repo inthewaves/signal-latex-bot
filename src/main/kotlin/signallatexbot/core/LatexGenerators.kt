@@ -12,6 +12,7 @@ import java.nio.file.Files
 import javax.imageio.IIOImage
 import javax.imageio.ImageIO
 import javax.imageio.ImageTypeSpecifier
+import javax.imageio.ImageWriteParam
 import javax.imageio.metadata.IIOInvalidTreeException
 import javax.imageio.metadata.IIOMetadata
 import javax.imageio.metadata.IIOMetadataNode
@@ -266,10 +267,9 @@ class JLaTeXMathGenerator : LatexGenerator {
                 insets = if (useMobileFriendlyInsets) {
                     // trueIconWidth + 2*(horizontalInset) = max
                     val horizontalInset = ((max - trueIconWidth) / 2.0)
-                        .coerceAtLeast(0.0)
-                        .let { if (it in 0.0..0.005) 0.05 * max else it }
+                        .coerceAtLeast(0.05 * max)
                         .roundToInt()
-                    val verticalInset = ((max - trueIconHeight) / 2.0 - 1.5 * percentage * max)
+                    val verticalInset = ((max - trueIconHeight) / 2.0)
                         // Signal has footers for images that can obscure the image
                         .coerceAtLeast(0.15 * trueIconHeight)
                         .roundToInt()
@@ -320,25 +320,36 @@ class JLaTeXMathGenerator : LatexGenerator {
     private fun saveGridImage(output: File, gridImage: BufferedImage) {
         output.delete()
         val start = TimeSource.Monotonic.markNow()
-        for (writer in ImageIO.getImageWritersByFormatName("png")) {
-            val writeParam = writer.defaultWriteParam
-            val typeSpecifier = ImageTypeSpecifier.createFromBufferedImageType(BufferedImage.TYPE_INT_ARGB)
-            val metadata = writer.getDefaultImageMetadata(typeSpecifier, writeParam)
-            if (metadata.isReadOnly || !metadata.isStandardMetadataFormatSupported) {
-                continue
-            }
-            val writerFindTime = start.elapsedNow()
-            val dpiTime = measureTime { setDPI(metadata) }
 
-            val (stream, streamTime) = measureTimedValue { ImageIO.createImageOutputStream(output) }
-            val writeTime = measureTime {
-                stream.use { str ->
-                    writer.output = str
-                    writer.write(metadata, IIOImage(gridImage, null, metadata), writeParam)
+        // getImageWritersByFormatName will create new writers, making it thread-safe.
+        for (writer in ImageIO.getImageWritersByFormatName("png")) {
+            println("Writer class: ${writer::class.simpleName}")
+            try {
+                val writeParam = writer.defaultWriteParam
+                if (!writeParam.canWriteCompressed()) continue
+                writeParam.apply {
+                    compressionMode = ImageWriteParam.MODE_EXPLICIT
+                    compressionQuality = 0.0f
                 }
+
+                val typeSpecifier = ImageTypeSpecifier.createFromBufferedImageType(BufferedImage.TYPE_INT_ARGB)
+                val metadata = writer.getDefaultImageMetadata(typeSpecifier, writeParam)
+                if (metadata.isReadOnly || !metadata.isStandardMetadataFormatSupported) continue
+                val writerFindTime = start.elapsedNow()
+                val dpiTime = measureTime { setDPI(metadata) }
+
+                val (stream, streamTime) = measureTimedValue { ImageIO.createImageOutputStream(output) }
+                val writeTime = measureTime {
+                    stream.use { str ->
+                        writer.output = str
+                        writer.write(metadata, IIOImage(gridImage, null, metadata), writeParam)
+                    }
+                }
+                println("Times: writer find: $writerFindTime, dpi: $dpiTime, stream: $streamTime, write: $writeTime")
+                return
+            } finally {
+                writer.dispose()
             }
-            println("Times: writer find: $writerFindTime, dpi: $dpiTime, stream: $streamTime, write: $writeTime")
-            return
         }
         throw IOException("unable to find any image writers")
     }
