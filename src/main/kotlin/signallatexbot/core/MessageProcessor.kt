@@ -492,6 +492,22 @@ class MessageProcessor(
                                     .absolutePath
                             }
                         }.also { println("LaTeX request $requestId took ${genMark.elapsedNow()}") }
+                    } catch (e: OutOfMemoryError) {
+                        // TODO: When we switch to Podman containers, remove this since memory usage during generation
+                        //  will be restricted by Podman
+                        System.err.println("Failed to parse LaTeX for request $requestId: (OutOfMemoryError)")
+                        timedOut = true
+                        sendMessage(
+                            Reply.Error(
+                                requestId = requestId,
+                                replyRecipient = replyRecipient,
+                                originalMessage = incomingMessage,
+                                delay = sendDelay,
+                                replyTimestamp = replyMessageTimestamp,
+                                errorMessage = "Failed to parse LaTeX: Timed out"
+                            )
+                        )
+                        throw e
                     } catch (e: Exception) {
                         System.err.println("Failed to parse LaTeX for request $requestId: ${e.stackTraceToString()}")
                         latexImageFile.delete()
