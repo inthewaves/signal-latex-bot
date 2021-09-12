@@ -320,7 +320,7 @@ class MessageProcessor(
 
         val source = incomingMessage.data.source?.takeUnless { it.uuid == null || it.number == null }
         if (source == null) {
-            println("received a message without a UUID or a number as the source: ${incomingMessage.data} ($msgId)")
+            println("received a message without a UUID or a number as the source ($msgId)")
             return
         }
 
