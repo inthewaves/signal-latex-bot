@@ -40,7 +40,7 @@ dependencies {
     implementation("com.github.ajalt.clikt:clikt:3.2.0")
     implementation("com.google.crypto.tink:tink:1.6.1")
 
-    implementation("com.squareup.sqldelight:sqlite-driver:1.5.1")
+    implementation("com.squareup.sqldelight:sqlite-driver:1.5.2")
     // transitive dependency of com.squareup.sqldelight:sqlite-driver anyway, included for config options
     implementation("org.xerial:sqlite-jdbc:3.36.0.3")
     testImplementation(kotlin("test"))
