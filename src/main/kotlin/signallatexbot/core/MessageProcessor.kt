@@ -860,7 +860,7 @@ class MessageProcessor(
                 )
             }
 
-            suspend fun sendMessage(
+            suspend fun sendMessageToSignald(
                 retryGroupMemberSubset: List<JsonAddress> = emptyList()
             ): SendResponse = runInterruptible {
                 val recipient = if (reply.replyRecipient is Recipient.Group && retryGroupMemberSubset.isNotEmpty()) {
@@ -889,27 +889,33 @@ class MessageProcessor(
                 }
             }
 
-            val sendResponse: SendResponse = sendMessage()
+            val sendResponse: SendResponse = sendMessageToSignald()
 
-            fun getResultString(sendResponse: SendResponse, isRetry: Boolean): String {
+            fun getResultString(sendResponse: SendResponse, isRetry: Boolean) = buildString {
                 val successes = sendResponse.results.count { it.success != null }
-                return if (sendResponse.results.size == 1) {
+                if (sendResponse.results.size == 1) {
                     if (successes == 1) {
-                        "successfully handled LaTeX request ${reply.requestId}"
+                        append("successfully handled LaTeX request ${reply.requestId}")
                     } else {
                         val failure = sendResponse.results.single()
-                        "failed to send LaTeX request ${reply.requestId}: " +
+                        append(
+                            "failed to send LaTeX request ${reply.requestId}: " +
                                 "unregistered=${failure.unregisteredFailure}, " +
                                 "networkFailure=${failure.networkFailure}, " +
                                 "identityFailure=${failure.identityFailure != null}"
+                        )
                     }
                 } else {
                     if (successes == sendResponse.results.size) {
-                        "successfully handled LaTeX request ${reply.requestId} to a group"
+                        append("successfully handled LaTeX request ${reply.requestId} to a group")
                     } else {
-                        "partially sent LaTeX request ${reply.requestId} ($successes / ${sendResponse.results} messages)"
+                        append("partially sent LaTeX request ${reply.requestId} ")
+                        append("$successes / ${sendResponse.results} messages)")
                     }
-                }.let { if (isRetry) "$it (retry)" else it }
+                }
+                if (isRetry) {
+                    append(" (retry send for identity failures)")
+                }
             }
             println(getResultString(sendResponse, isRetry = false))
 
@@ -957,17 +963,16 @@ class MessageProcessor(
                         }
                 }
 
-                // don't retry sending to groups until https://gitlab.com/signald/signald/-/issues/209
                 if (addressesWithIdentityFailures.isNotEmpty() && identityFailuresHandled > 0L) {
                     when (reply.replyRecipient) {
                         is Recipient.Group -> {
                             println("retrying group message after new identity keys trusted")
-                            val retrySendResponse = sendMessage(retryGroupMemberSubset = addressesWithIdentityFailures)
+                            val retrySendResponse = sendMessageToSignald(retryGroupMemberSubset = addressesWithIdentityFailures)
                             println(getResultString(retrySendResponse, isRetry = true))
                         }
                         is Recipient.Individual -> {
                             println("retrying message after new identity keys trusted")
-                            val retrySendResponse = sendMessage()
+                            val retrySendResponse = sendMessageToSignald()
                             println(getResultString(retrySendResponse, isRetry = true))
                         }
                     }
