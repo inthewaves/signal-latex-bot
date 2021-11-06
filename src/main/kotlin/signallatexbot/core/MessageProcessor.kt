@@ -26,12 +26,15 @@ import org.inthewaves.kotlinsignald.TrustLevel
 import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
 import org.inthewaves.kotlinsignald.clientprotocol.v0.structures.JsonAttachment
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.Account
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ClientMessageWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.InternalError
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAddress
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.WebSocketConnectionState
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
 import signallatexbot.db.BotDatabase
@@ -190,9 +193,19 @@ class MessageProcessor(
                         is ListenerState -> {
                             println("Received listener state update (connected=${message.data.connected})")
                         }
+                        is WebSocketConnectionState -> {
+                            println("Received WebSocketConnectionState update ($message)")
+                        }
                         is ExceptionWrapper -> {
                             println("Received ExceptionWrapper: (${message.data})")
-                            handleExceptionWrapperMessage(message)
+                            launch { handleExceptionMessage(message) }
+                        }
+                        is InternalError -> {
+                            println("Received InternalError: (${message.data}, ${message.data.exceptions})")
+                            launch { handleExceptionMessage(message) }
+                        }
+                        else -> {
+                            println("Received unknown message: (${message.data})")
                         }
                     }
                 }
@@ -279,17 +292,26 @@ class MessageProcessor(
         }
     }
 
-    private fun CoroutineScope.handleExceptionWrapperMessage(message: ExceptionWrapper) {
-        launch {
-            if (message.data.message?.contains("ProtocolUntrustedIdentityException") == true) {
-                // If a user's safety number changes, their incoming messages will just be received as ExceptionWrapper
-                // messages with "org.signal.libsignal.metadata.ProtocolUntrustedIdentityException" as the message. We
-                // may never be able to get their actual messages until we trust their new identity key(s).
-                //
-                // Since the ExceptionWrapper message doesn't specify who the user is, we have to trust all untrusted
-                // identity keys.
-                trustAllUntrustedIdentityKeys()
-            }
+    private suspend fun handleExceptionMessage(message: ClientMessageWrapper) {
+        val (exceptionMessage: String?, exceptionsList: List<String>) = when (message) {
+            is ExceptionWrapper -> message.data.message to emptyList()
+            is InternalError -> message.data.message to message.data.exceptions
+            else -> null to emptyList()
+        }
+
+        val containedUntrustedIdentity =
+            exceptionMessage?.contains("ProtocolUntrustedIdentityException") == true ||
+                exceptionsList.any { msg -> msg.contains("ProtocolUntrustedIdentityException") }
+
+        if (containedUntrustedIdentity) {
+            // If a user's safety number changes, their incoming messages will just be received as
+            // ExceptionWrapper/InternalError messages with
+            // "org.signal.libsignal.metadata.ProtocolUntrustedIdentityException" as the message. We may never be able
+            // to get their actual messages until we trust their new identity key(s).
+            //
+            // Since the ExceptionWrapper message doesn't specify who the user is, we have to trust all untrusted
+            // identity keys.
+            trustAllUntrustedIdentityKeys()
         }
     }
 
@@ -424,6 +446,9 @@ class MessageProcessor(
                     val sendDelay: Long
                     when (rateLimitStatus) {
                         is RateLimitStatus.Blocked -> {
+                            // this warning about "'when' expression on sealed classes is recommended to be exhaustive"
+                            // is a bit buggy with sealed classes nested in another sealed class, since these are all
+                            // the subtypes of RateLimitStatus.Blocked
                             when (rateLimitStatus) {
                                 is RateLimitStatus.Blocked.WithNoReply -> {
                                     println("blocking request $requestId (${rateLimitStatus.reason})")
@@ -817,13 +842,13 @@ class MessageProcessor(
             println("replying to request ${reply.requestId} (${reply::class.simpleName}) after a ${reply.delay} ms delay")
             delay(reply.delay)
 
-            fun sendErrorMessage(errorReply: Reply.ErrorReply): SendResponse {
+            fun sendErrorMessage(errorReply: Reply.ErrorReply, recipient: Recipient): SendResponse {
                 println(
                     "sending LaTeX request failure for ${errorReply.requestId}; " +
                             "Failure message: [${errorReply.errorMessage}]"
                 )
                 return signal.send(
-                    recipient = errorReply.replyRecipient,
+                    recipient = recipient,
                     messageBody = errorReply.errorMessage,
                     quote = JsonQuote(
                         id = originalMsgData.timestamp,
@@ -835,13 +860,21 @@ class MessageProcessor(
                 )
             }
 
-            suspend fun sendMessage() = runInterruptible {
+            suspend fun sendMessage(
+                retryGroupMemberSubset: List<JsonAddress> = emptyList()
+            ): SendResponse = runInterruptible {
+                val recipient = if (reply.replyRecipient is Recipient.Group && retryGroupMemberSubset.isNotEmpty()) {
+                    (reply.replyRecipient as Recipient.Group).withMemberSubset(retryGroupMemberSubset)
+                } else {
+                    reply.replyRecipient
+                }
+
                 when (reply) {
-                    is Reply.Error -> sendErrorMessage(reply)
-                    is Reply.TryAgainMessage -> sendErrorMessage(reply)
+                    is Reply.Error -> sendErrorMessage(reply, recipient)
+                    is Reply.TryAgainMessage -> sendErrorMessage(reply, recipient)
                     is Reply.LatexReply -> {
                         signal.send(
-                            recipient = reply.replyRecipient,
+                            recipient = recipient,
                             messageBody = "",
                             attachments = listOf(JsonAttachment(filename = reply.latexImagePath)),
                             quote = JsonQuote(
@@ -884,47 +917,60 @@ class MessageProcessor(
             if (successes != sendResponse.results.size) {
                 println("Attempting to handle identity failures (safety number changes)")
                 var identityFailuresHandled = 0L
-                sendResponse.results.asSequence()
+
+                val addressesWithIdentityFailures = sendResponse.results.asSequence()
                     .filter { sendResult ->
                         val isValidAddress = sendResult.address?.uuid != null || sendResult.address?.number != null
                         sendResult.identityFailure != null && isValidAddress
                     }
-                    .forEach { failedIdentityResult ->
-                        val address = failedIdentityResult.address!!
-                        val identifier = addressToIdentifierCache.get(address)
-                        println("trusting identities for $identifier")
+                    .map { it.address }
+                    .filterNotNull()
+                    .toList()
 
-                        val identities = try {
-                            runInterruptible { signal.getIdentities(address).identities }
-                        } catch (e: SignaldException) {
-                            System.err.println("failed to get identities for address: ${e.stackTraceToString()}")
-                            return@forEach
-                        }
+                for (address in addressesWithIdentityFailures) {
+                    val identifier = addressToIdentifierCache.get(address)
+                    println("trusting identities for $identifier")
 
-                        identities.asSequence()
-                            .filter {
-                                it.trustLevel == "UNTRUSTED" && (it.safetyNumber != null || it.qrCodeData != null)
-                            }
-                            .map { identityKey ->
-                                identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
-                                    ?: identityKey.qrCodeData!!.let { Fingerprint.QrCodeData(it) }
-                            }
-                            .forEach { fingerprint ->
-                                try {
-                                    runInterruptible { signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED) }
-                                    println("Trusted new identity key for $identifier")
-                                    identityFailuresHandled++
-                                } catch (e: SignaldException) {
-                                    System.err.println("Failed to trust $identifier: ${e.stackTraceToString()}")
-                                }
-                            }
+                    val identities = try {
+                        runInterruptible { signal.getIdentities(address).identities }
+                    } catch (e: SignaldException) {
+                        System.err.println("failed to get identities for address: ${e.stackTraceToString()}")
+                        continue
                     }
 
+                    identities.asSequence()
+                        .filter {
+                            it.trustLevel == "UNTRUSTED" && (it.safetyNumber != null || it.qrCodeData != null)
+                        }
+                        .map { identityKey ->
+                            identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
+                                ?: identityKey.qrCodeData!!.let { Fingerprint.QrCodeData(it) }
+                        }
+                        .forEach { fingerprint ->
+                            try {
+                                runInterruptible { signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED) }
+                                println("Trusted new identity key for $identifier")
+                                identityFailuresHandled++
+                            } catch (e: SignaldException) {
+                                System.err.println("Failed to trust $identifier: ${e.stackTraceToString()}")
+                            }
+                        }
+                }
+
                 // don't retry sending to groups until https://gitlab.com/signald/signald/-/issues/209
-                if (reply.replyRecipient !is Recipient.Group && identityFailuresHandled > 0L) {
-                    println("retrying message after new identity keys trusted")
-                    val retrySendResponse = sendMessage()
-                    println(getResultString(retrySendResponse, isRetry = true))
+                if (addressesWithIdentityFailures.isNotEmpty() && identityFailuresHandled > 0L) {
+                    when (reply.replyRecipient) {
+                        is Recipient.Group -> {
+                            println("retrying group message after new identity keys trusted")
+                            val retrySendResponse = sendMessage(retryGroupMemberSubset = addressesWithIdentityFailures)
+                            println(getResultString(retrySendResponse, isRetry = true))
+                        }
+                        is Recipient.Individual -> {
+                            println("retrying message after new identity keys trusted")
+                            val retrySendResponse = sendMessage()
+                            println(getResultString(retrySendResponse, isRetry = true))
+                        }
+                    }
                 }
             }
         } finally {
