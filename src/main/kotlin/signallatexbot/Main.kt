@@ -445,6 +445,7 @@ class UpdateProfileCommand : BaseSignaldCommand(name = "update-profile", help = 
                 about = null,
                 emoji = null,
                 mobileCoinAddress = null,
+                visibleBadgeIds = null,
             )
         } finally {
             avatarCopy?.delete()
