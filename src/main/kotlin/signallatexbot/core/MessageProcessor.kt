@@ -8,6 +8,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -221,6 +226,7 @@ class MessageProcessor(
     sealed interface IncomingMessageType : CoroutineContext.Element {
         @JvmInline
         value class LatexRequestMessage(val latexText: String) : IncomingMessageType
+
         @JvmInline
         value class RemoteDeleteMessage(val targetSentTimestamp: Long) : IncomingMessageType
         object InvalidMessage : IncomingMessageType
@@ -921,53 +927,67 @@ class MessageProcessor(
 
             val successes = sendResponse.results.count { it.success != null }
             if (successes != sendResponse.results.size) {
-                println("Attempting to handle identity failures (safety number changes)")
-                var identityFailuresHandled = 0L
+                println("Attempting to handle any identity failures (safety number changes)")
 
-                val addressesWithIdentityFailures = sendResponse.results.asSequence()
+                data class IdentityTrustResults(val address: JsonAddress, val trustSuccessful: Boolean)
+
+                val usersRetrustedSuccessfully: List<JsonAddress> = sendResponse.results.asFlow()
                     .filter { sendResult ->
                         val isValidAddress = sendResult.address?.uuid != null || sendResult.address?.number != null
                         sendResult.identityFailure != null && isValidAddress
                     }
                     .map { it.address }
                     .filterNotNull()
+                    .map { address ->
+                        val identifier = addressToIdentifierCache.get(address)
+                        println("trusting identities for $identifier")
+
+                        val identities = try {
+                            runInterruptible { signal.getIdentities(address).identities }
+                        } catch (e: SignaldException) {
+                            System.err.println("failed to get identities for address: ${e.stackTraceToString()}")
+                            return@map null
+                        }
+
+                        val identityFailuresHandled = identities.asSequence()
+                            .filter {
+                                it.trustLevel == "UNTRUSTED" && (it.safetyNumber != null || it.qrCodeData != null)
+                            }
+                            .map { identityKey ->
+                                identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
+                                    ?: identityKey.qrCodeData!!.let { Fingerprint.QrCodeData(it) }
+                            }
+                            .fold(initial = 0L) { identityFailuresHandledSoFar, fingerprint ->
+                                try {
+                                    runInterruptible {
+                                        signal.trust(
+                                            address,
+                                            fingerprint,
+                                            TrustLevel.TRUSTED_UNVERIFIED
+                                        )
+                                    }
+                                    println("Trusted new identity key for $identifier")
+                                    identityFailuresHandledSoFar + 1
+                                } catch (e: SignaldException) {
+                                    System.err.println("Failed to trust $identifier: ${e.stackTraceToString()}")
+                                    identityFailuresHandledSoFar
+                                }
+                            }
+
+                        IdentityTrustResults(address, trustSuccessful = identityFailuresHandled > 0)
+                    }
+                    .filterNotNull()
+                    .filter { it.trustSuccessful }
+                    .map { it.address }
                     .toList()
 
-                for (address in addressesWithIdentityFailures) {
-                    val identifier = addressToIdentifierCache.get(address)
-                    println("trusting identities for $identifier")
-
-                    val identities = try {
-                        runInterruptible { signal.getIdentities(address).identities }
-                    } catch (e: SignaldException) {
-                        System.err.println("failed to get identities for address: ${e.stackTraceToString()}")
-                        continue
-                    }
-
-                    identities.asSequence()
-                        .filter {
-                            it.trustLevel == "UNTRUSTED" && (it.safetyNumber != null || it.qrCodeData != null)
-                        }
-                        .map { identityKey ->
-                            identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
-                                ?: identityKey.qrCodeData!!.let { Fingerprint.QrCodeData(it) }
-                        }
-                        .forEach { fingerprint ->
-                            try {
-                                runInterruptible { signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED) }
-                                println("Trusted new identity key for $identifier")
-                                identityFailuresHandled++
-                            } catch (e: SignaldException) {
-                                System.err.println("Failed to trust $identifier: ${e.stackTraceToString()}")
-                            }
-                        }
-                }
-
-                if (addressesWithIdentityFailures.isNotEmpty() && identityFailuresHandled > 0L) {
+                if (usersRetrustedSuccessfully.isNotEmpty()) {
                     when (reply.replyRecipient) {
                         is Recipient.Group -> {
                             println("retrying group message after new identity keys trusted")
-                            val retrySendResponse = sendMessageToSignald(retryGroupMemberSubset = addressesWithIdentityFailures)
+                            val retrySendResponse = sendMessageToSignald(
+                                retryGroupMemberSubset = usersRetrustedSuccessfully
+                            )
                             println(getResultString(retrySendResponse, isRetry = true))
                         }
                         is Recipient.Individual -> {
