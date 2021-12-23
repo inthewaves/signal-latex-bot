@@ -75,7 +75,10 @@ import kotlin.time.TimeSource
 /**
  * Any of `!tex`, `/tex`, `!latex`, `/latex` will work
  */
-private val GROUP_COMMAND_PREFIX_REGEX = Regex("""^([!/])(la)?tex (.*)$""", RegexOption.IGNORE_CASE)
+val GROUP_COMMAND_PREFIX_REGEX = Regex(
+    """^([!/])(la)?tex[ \n](.*)""",
+    setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+)
 
 private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
