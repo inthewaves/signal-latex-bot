@@ -426,7 +426,7 @@ class MessageProcessor(
 
         val incomingMsgType = IncomingMessageType.getHandleType(incomingMessage)
         if (incomingMsgType is IncomingMessageType.InvalidMessage) {
-            println("message doesn't have body ($msgId)")
+            println("message is InvalidMessage ($msgId)")
             return
         }
 
@@ -462,7 +462,7 @@ class MessageProcessor(
                             }
                             println(
                                 "handled remote delete message from $requestId, " +
-                                        "targetTimestamp: $targetTimestamp. can't find the history entry"
+                                        "targetTimestamp: $targetTimestamp. found the history entry"
                             )
                         } else {
                             println(
