@@ -422,7 +422,7 @@ class MessageProcessor(
             val userMutex: Mutex
             identifierMutexesMutex.withLock {
                 identifier = addressToIdentifierCache.get(source)
-                userMutex = identifierMutexes.getOrPut(identifier) { Mutex() }
+                userMutex = identifierMutexes.computeIfAbsent(identifier) { Mutex() }
             }
             val requestId = RequestId.create(identifier, incomingMessage)
 

@@ -20,7 +20,7 @@ class AddressIdentifierCache private constructor(
 
     private val mutex = Mutex()
     suspend fun get(address: JsonAddress): UserIdentifier = mutex.withLock {
-        map.getOrPut(UserIdentifier.getIdentifierToUse(address)) {
+        map.computeIfAbsent(UserIdentifier.getIdentifierToUse(address)) {
             val result: UserIdentifier
             val timeToGenerate = measureTimeMillis { result = UserIdentifier.create(address, salt) }
             val timeToInsert = measureTimeMillis { database.userQueries.insertOrIgnore(result) }
