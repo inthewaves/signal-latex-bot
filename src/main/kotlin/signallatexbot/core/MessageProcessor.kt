@@ -73,7 +73,7 @@ import kotlin.random.nextLong
 import kotlin.time.TimeSource
 
 /**
- * Any of `!tex`, `/tex`, `!latex`, `/latex` will work, or a mention to the bot
+ * Any of `!tex`, `/tex`, `!latex`, `/latex` will work
  */
 private val GROUP_COMMAND_PREFIX_REGEX = Regex("""^([!/])(la)?tex (.*)$""", RegexOption.IGNORE_CASE)
 
@@ -380,12 +380,8 @@ class MessageProcessor(
 
         val isGroupV2Message = incomingMessage.data.dataMessage?.groupV2 != null
         if (isGroupV2Message && incomingMessage.data.dataMessage?.remoteDelete == null) {
-            val mentionToBot = incomingMessage.data.dataMessage?.mentions?.find { it.uuid == botUuid }
-            if (
-                mentionToBot == null &&
-                incomingMessage.data.dataMessage?.body?.matches(GROUP_COMMAND_PREFIX_REGEX) != true
-            ) {
-                println("received a V2 group message without a mention or a prefix ($msgId)")
+            if (incomingMessage.data.dataMessage?.body?.matches(GROUP_COMMAND_PREFIX_REGEX) != true) {
+                println("received a V2 group message without a prefix ($msgId)")
                 return
             }
         }
