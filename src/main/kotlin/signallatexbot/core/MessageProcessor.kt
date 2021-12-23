@@ -254,72 +254,92 @@ class MessageProcessor(
     private val trustAllMutex = Mutex()
 
     private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = trustAllMutex.withLock {
-        supervisorScope {
-            if (!bypassTimeCheck) {
-                val now = System.currentTimeMillis()
-                if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
-                    println("Not trusting identity keys --- too early")
-                    return@supervisorScope
-                }
-                lastTrustAllAttemptTimestamp.set(now)
+        if (!bypassTimeCheck) {
+            val now = System.currentTimeMillis()
+            if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
+                println("Not trusting identity keys --- too early")
+                return
             }
-
-            val trustCallMutex = Mutex()
-            println("Trusting all untrusted identity keys")
-            runInterruptible { signal.getAllIdentities() }
-                .identityKeys
-                .asSequence()
-                .filter { it.address != null }
-                .forEach { identityKeyList ->
-                    launch {
-                        val address = identityKeyList.address!!
-                        identityKeyList.identities.asSequence()
-                            .filter { it.trustLevel == "UNTRUSTED" }
-                            .map { identityKey ->
-                                identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
-                                    ?: identityKey.qrCodeData?.let { Fingerprint.QrCodeData(it) }
-                            }
-                            .filterNotNull()
-                            .forEach { fingerprint ->
-                                try {
-                                    trustCallMutex.withLock {
-                                        runInterruptible {
-                                            signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED)
-                                        }
-                                        println("trusted an identity key for ${addressToIdentifierCache.get(address)}")
-                                    }
-                                } catch (e: SignaldException) {
-                                    System.err.println(
-                                        "unable to trust an identity key for ${addressToIdentifierCache.get(address)}"
-                                    )
-                                }
-                            }
-                    }
-                }
+            lastTrustAllAttemptTimestamp.set(now)
         }
+
+        println("Trusting all untrusted identity keys")
+        runInterruptible { signal.getAllIdentities() }
+            .identityKeys
+            .asSequence()
+            .filter { it.address != null }
+            .forEach { identityKeyList ->
+                val address = identityKeyList.address!!
+                identityKeyList.identities.asSequence()
+                    .filter { it.trustLevel == "UNTRUSTED" }
+                    .map { identityKey ->
+                        identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
+                            ?: identityKey.qrCodeData?.let { Fingerprint.QrCodeData(it) }
+                    }
+                    .filterNotNull()
+                    .forEach { fingerprint ->
+                        // Delay because signald apparently sends out sync messages for every trust we do.
+                        delay(secureKotlinRandom.nextLong(300L..500L))
+                        try {
+                            runInterruptible {
+                                signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED)
+                            }
+                            println("trusted an identity key for ${addressToIdentifierCache.get(address)}")
+                        } catch (e: SignaldException) {
+                            System.err.println(
+                                "unable to trust an identity key for ${addressToIdentifierCache.get(address)}"
+                            )
+                        }
+                    }
+            }
     }
 
     private suspend fun handleExceptionMessage(message: ClientMessageWrapper) {
         val containedUntrustedIdentity = when (message) {
             is ExceptionWrapper -> {
-                System.err.println("ExceptionWrapper is UntrustedIdentityError")
-                message.data.message?.contains("ProtocolUntrustedIdentityException") == true
+                (message.data.message?.contains("ProtocolUntrustedIdentityException") == true)
+                    .also { if (it) System.err.println("ExceptionWrapper has ProtocolUntrustedIdentityException") }
             }
             is IncomingException -> {
-                System.err.println("IncomingException is UntrustedIdentityError")
-                message.typedException is UntrustedIdentityError
+                (message.typedException is UntrustedIdentityError)
+                    .also { if (it) System.err.println("IncomingException is UntrustedIdentityError") }
             }
             else -> false
         }
 
         if (containedUntrustedIdentity) {
             // If a user's safety number changes, their incoming messages will just be received as
-            // ExceptionWrapper/InternalError messages with
             // "org.signal.libsignal.metadata.ProtocolUntrustedIdentityException" as the message. We may never be able
             // to get their actual messages until we trust their new identity key(s).
-            //
-            // Since the ExceptionWrapper message doesn't specify who the user is, we have to trust all untrusted
-            // identity keys.
+            val exception = (message as? IncomingException)?.typedException
+            if (exception is UntrustedIdentityError && exception.identifier != null) {
+                val identifier = exception.identifier!!
+                val address = if (identifier.startsWith("+")) {
+                    JsonAddress(number = identifier)
+                } else {
+                    JsonAddress(uuid = identifier)
+                }
+
+                val fingerprint: Fingerprint? = exception.identityKey
+                    ?.let { identityKey ->
+                        identityKey.safetyNumber?.let { Fingerprint.SafetyNumber(it) }
+                            ?: identityKey.qrCodeData?.let { Fingerprint.QrCodeData(it) }
+                    }
+                if (fingerprint != null) {
+                    try {
+                        runInterruptible { signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED) }
+                        println("trusted new key for user id ${addressToIdentifierCache.get(address)}")
+                    } catch (e: SignaldException) {
+                        System.err.println("failed to trust")
+                    }
+                    return
+                }
+
+                System.err.println("UntrustedIdentityError is missing fingerprint; falling back to trusting all keys")
+            } else {
+                System.err.println("UntrustedIdentityError is missing identifier; falling back to trusting all keys")
+            }
+
             trustAllUntrustedIdentityKeys()
         }
     }
