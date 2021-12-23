@@ -72,6 +72,11 @@ import kotlin.random.asKotlinRandom
 import kotlin.random.nextLong
 import kotlin.time.TimeSource
 
+/**
+ * Any of `!tex`, `/tex`, `!latex`, `/latex` will work, or a mention to the bot
+ */
+private val GROUP_COMMAND_PREFIX_REGEX = Regex("""^([!/])(la)?tex (.*)$""", RegexOption.IGNORE_CASE)
+
 private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
 private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
@@ -242,7 +247,16 @@ class MessageProcessor(
                 return if (remoteDelete?.targetSentTimestamp != null) {
                     RemoteDeleteMessage(remoteDelete.targetSentTimestamp!!)
                 } else if (!body.isNullOrBlank()) {
-                    LatexRequestMessage(body)
+                    if (incomingMessage.data.dataMessage?.groupV2 != null) {
+                        GROUP_COMMAND_PREFIX_REGEX.matchEntire(body)
+                            ?.groups
+                            ?.lastOrNull()
+                            ?.value
+                            ?.let { LatexRequestMessage(it) }
+                            ?: LatexRequestMessage(body)
+                    } else {
+                        LatexRequestMessage(body)
+                    }
                 } else {
                     InvalidMessage
                 }
@@ -367,8 +381,11 @@ class MessageProcessor(
         val isGroupV2Message = incomingMessage.data.dataMessage?.groupV2 != null
         if (isGroupV2Message && incomingMessage.data.dataMessage?.remoteDelete == null) {
             val mentionToBot = incomingMessage.data.dataMessage?.mentions?.find { it.uuid == botUuid }
-            if (mentionToBot == null) {
-                println("received a V2 group message without a mention ($msgId)")
+            if (
+                mentionToBot == null &&
+                incomingMessage.data.dataMessage?.body?.matches(GROUP_COMMAND_PREFIX_REGEX) != true
+            ) {
+                println("received a V2 group message without a mention or a prefix ($msgId)")
                 return
             }
         }
