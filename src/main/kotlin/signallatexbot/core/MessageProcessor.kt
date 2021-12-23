@@ -79,7 +79,7 @@ private val GROUP_COMMAND_PREFIX_REGEX = Regex("""^([!/])(la)?tex (.*)$""", Rege
 
 private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
-private val REPLY_DELAY_RANGE_MILLIS = 500L..1500L
+private val REPLY_DELAY_RANGE_MILLIS = 250L..1000L
 private const val LATEX_GENERATION_TIMEOUT_MILLIS = 4000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
