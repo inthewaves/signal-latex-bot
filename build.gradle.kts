@@ -33,7 +33,7 @@ repositories {
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.3.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.3.2")
     implementation("org.inthewaves.kotlin-signald:client-coroutines:0.18.0+signald-0.15.0-31-7354fec1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.0")
     implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
