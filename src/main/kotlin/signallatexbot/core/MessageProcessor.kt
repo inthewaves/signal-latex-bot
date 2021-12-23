@@ -33,12 +33,13 @@ import org.inthewaves.kotlinsignald.clientprotocol.v0.structures.JsonAttachment
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.Account
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ClientMessageWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingException
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
-import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.InternalError
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAddress
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.UntrustedIdentityError
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.WebSocketConnectionState
 import org.inthewaves.kotlinsignald.subscription.signalMessagesChannel
 import org.scilab.forge.jlatexmath.ParseException
@@ -205,12 +206,12 @@ class MessageProcessor(
                             println("Received ExceptionWrapper: (${message.data})")
                             launch { handleExceptionMessage(message) }
                         }
-                        is InternalError -> {
-                            println("Received InternalError: (${message.data}, ${message.data.exceptions})")
+                        is IncomingException -> {
+                            println("Received IncomingException: (${message.typedException})")
                             launch { handleExceptionMessage(message) }
                         }
                         else -> {
-                            println("Received unknown message: (${message.data})")
+                            println("Received unknown message (${message::class.java.simpleName}): (${message.data})")
                         }
                     }
                 }
@@ -299,15 +300,17 @@ class MessageProcessor(
     }
 
     private suspend fun handleExceptionMessage(message: ClientMessageWrapper) {
-        val (exceptionMessage: String?, exceptionsList: List<String>) = when (message) {
-            is ExceptionWrapper -> message.data.message to emptyList()
-            is InternalError -> message.data.message to message.data.exceptions
-            else -> null to emptyList()
+        val containedUntrustedIdentity = when (message) {
+            is ExceptionWrapper -> {
+                System.err.println("ExceptionWrapper is UntrustedIdentityError")
+                message.data.message?.contains("ProtocolUntrustedIdentityException") == true
+            }
+            is IncomingException -> {
+                System.err.println("IncomingException is UntrustedIdentityError")
+                message.typedException is UntrustedIdentityError
+            }
+            else -> false
         }
-
-        val containedUntrustedIdentity =
-            exceptionMessage?.contains("ProtocolUntrustedIdentityException") == true ||
-                exceptionsList.any { msg -> msg.contains("ProtocolUntrustedIdentityException") }
 
         if (containedUntrustedIdentity) {
             // If a user's safety number changes, their incoming messages will just be received as
