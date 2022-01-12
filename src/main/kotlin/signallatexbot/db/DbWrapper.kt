@@ -62,7 +62,11 @@ val SQLITE3_CONFIG: Properties = SQLiteConfig().apply {
 class DbWrapper(
     val db: BotDatabase,
     val driver: JdbcSqliteDriver
-)
+) {
+    fun doWalCheckpointTruncate() {
+        driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
+    }
+}
 
 suspend inline fun withDatabase(
     path: String = DEFAULT_DATABASE_PATH,

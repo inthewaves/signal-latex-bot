@@ -50,6 +50,7 @@ import signallatexbot.model.LatexCiphertext
 import signallatexbot.model.RequestId
 import signallatexbot.model.UserIdentifier
 import signallatexbot.util.AddressIdentifierCache
+import signallatexbot.util.LimitedLinkedHashMap
 import signallatexbot.util.addPosixPermissions
 import java.io.File
 import java.io.IOException
@@ -70,6 +71,9 @@ import kotlin.math.roundToLong
 import kotlin.random.Random
 import kotlin.random.asKotlinRandom
 import kotlin.random.nextLong
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
 /**
@@ -97,6 +101,8 @@ private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE = 15L
 private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4L
 
 private const val MAX_EXTRA_SEND_DELAY_SECONDS = 10.0
+
+private val GROUP_REFRESH_INTERVAL = 30.seconds
 
 class MessageProcessor(
     private val signal: Signal,
@@ -128,6 +134,9 @@ class MessageProcessor(
 
     private val identifierMutexesMutex = Mutex()
     private val identifierMutexes = hashMapOf<UserIdentifier, Mutex>()
+
+    private val groupUpdateMutex = Mutex()
+    private val groupIdToLastUpdateTimestampCache = LimitedLinkedHashMap<String, Duration>(maxEntries = 1000)
 
     private val errorHandler = CoroutineExceptionHandler { coroutineContext, throwable ->
         val incomingMessageType = coroutineContext[IncomingMessageType]?.let { it::class.simpleName }
@@ -169,7 +178,7 @@ class MessageProcessor(
             launch {
                 while (isActive) {
                     pruneHistory()
-                    dbWrapper.driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
+                    dbWrapper.doWalCheckpointTruncate()
                     delay(HISTORY_PURGE_INTERVAL_MILLIS)
                 }
             }
@@ -189,7 +198,7 @@ class MessageProcessor(
                         if (anyRemoved) {
                             println("identifierMutexes size is now ${identifierMutexes.size}")
                             if (identifierMutexes.size == 0) {
-                                dbWrapper.driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
+                                dbWrapper.doWalCheckpointTruncate()
                             }
                         }
                         System.gc()
@@ -446,7 +455,7 @@ class MessageProcessor(
                 val replyMessageTimestamp by lazy { System.currentTimeMillis() }
                 val latexBodyInput: String
                 when (incomingMsgType) {
-                    is IncomingMessageType.InvalidMessage -> error("unexpected message type")
+                    IncomingMessageType.InvalidMessage -> error("unexpected message type")
                     is IncomingMessageType.RemoteDeleteMessage -> {
                         val targetTimestamp = incomingMsgType.targetSentTimestamp
 
@@ -488,12 +497,40 @@ class MessageProcessor(
                         secureKotlinRandom
                     )
 
+                    if (rateLimitStatus !is RateLimitStatus.Blocked.WithNoReply) {
+                        // Refresh the group's info if this is a group. This ensures group state is accurate during
+                        // sends. For example, if our member list copy is out of date, some members might not get our
+                        // message.
+                        incomingMessage.data.dataMessage?.groupV2?.let { groupInfo ->
+                            val groupId = groupInfo.id ?: return@let
+                            groupUpdateMutex.withLock {
+                                val now = System.currentTimeMillis().milliseconds
+                                val lastUpdateTime: Duration? = groupIdToLastUpdateTimestampCache[groupId]
+                                val durationSinceLastUpdate = (lastUpdateTime ?: now) durationBetween now
+                                if (lastUpdateTime == null || durationSinceLastUpdate >= GROUP_REFRESH_INTERVAL) {
+                                    println("refreshing info of groupId $groupId (durationSinceLastUpdate: $durationSinceLastUpdate)")
+                                    try {
+                                        runInterruptible { signal.getGroup(groupId) }
+                                    } catch (e: IOException) {
+                                        System.err.println(
+                                            "failed to refresh info of groupId $groupId: " + e.stackTraceToString()
+                                        )
+                                    }
+                                    groupIdToLastUpdateTimestampCache[groupId] = System.currentTimeMillis().milliseconds
+                                } else {
+                                    val durationLeft = durationSinceLastUpdate durationBetween GROUP_REFRESH_INTERVAL
+                                    println(
+                                        "skipping refresh of info of groupId $groupId; " +
+                                                "too early (duration left: $durationLeft)"
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     val sendDelay: Long
                     when (rateLimitStatus) {
                         is RateLimitStatus.Blocked -> {
-                            // this warning about "'when' expression on sealed classes is recommended to be exhaustive"
-                            // is a bit buggy with sealed classes nested in another sealed class, since these are all
-                            // the subtypes of RateLimitStatus.Blocked
                             when (rateLimitStatus) {
                                 is RateLimitStatus.Blocked.WithNoReply -> {
                                     println("blocking request $requestId (${rateLimitStatus.reason})")
@@ -1052,6 +1089,8 @@ class MessageProcessor(
         processorScope.cancel("close() was called")
     }
 }
+
+infix fun Duration.durationBetween(other: Duration) = (this - other).absoluteValue
 
 /**
  * Runs the given [block] on a dedicated [Thread] subject to a timeout that kills the thread. The threads created
