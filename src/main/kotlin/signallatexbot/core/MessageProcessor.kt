@@ -91,6 +91,8 @@ private const val LATEX_GENERATION_TIMEOUT_MILLIS = 4000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 
+private const val MAX_CONCURRENT_GROUP_PROCESSING = 2
+
 private val HISTORY_PURGE_INTERVAL_MILLIS = TimeUnit.DAYS.toMillis(1)
 private const val MAX_NON_TIMED_OUT_HISTORY_LIFETIME_DAYS = 1L
 private const val MAX_TIMED_OUT_HISTORY_LIFETIME_DAYS = 10L
@@ -189,24 +191,37 @@ class MessageProcessor(
       launch {
         while (isActive) {
           identifierMutexesMutex.withLock {
+            val sizeBefore = identifierMutexes.size
             val iterator = identifierMutexes.iterator()
-            var anyRemoved = false
             for ((id, mutex) in iterator) {
               if (!mutex.isLocked) {
                 iterator.remove()
-                anyRemoved = true
                 println("removed unused mutex for $id")
               }
             }
-            if (anyRemoved) {
+            if (identifierMutexes.size != sizeBefore) {
               println("identifierMutexes size is now ${identifierMutexes.size}")
               if (identifierMutexes.size == 0) {
                 dbWrapper.doWalCheckpointTruncate()
               }
             }
-            System.gc()
           }
 
+          groupSemaphoresMutex.withLock {
+            val sizeBefore = groupSemaphores.size
+            val iterator = groupSemaphores.iterator()
+            for ((id, semaphore) in iterator) {
+              if (semaphore.availablePermits != MAX_CONCURRENT_GROUP_PROCESSING) {
+                iterator.remove()
+                println("removed unused group semaphore for $id")
+              }
+            }
+            if (groupSemaphores.size != sizeBefore) {
+              println("groupSemaphores size is now ${groupSemaphores.size}")
+            }
+          }
+
+          System.gc()
           delay(TimeUnit.MINUTES.toMillis(10L))
         }
       }
@@ -452,212 +467,172 @@ class MessageProcessor(
         identifier = addressToIdentifierCache.get(source)
         userMutex = identifierMutexes.computeIfAbsent(identifier) { Mutex() }
       }
+
+      val maybeGroupSemaphore: NullableSemaphore = incomingMessage.data.dataMessage?.groupV2?.id?.let { groupId ->
+        groupSemaphoresMutex.withLock {
+          println("acquiring group semaphore for group $groupId")
+          NullableSemaphore(
+            groupSemaphores.computeIfAbsent(groupId) { Semaphore(permits = MAX_CONCURRENT_GROUP_PROCESSING) }
+          )
+        }
+      } ?: NullableSemaphore(null)
+
       val requestId = RequestId.create(identifier, incomingMessage)
 
       userMutex.withLockAndContext(requestId) {
-        val replyMessageTimestamp by lazy { System.currentTimeMillis() }
-        val latexBodyInput: String
-        when (incomingMsgType) {
-          IncomingMessageType.InvalidMessage -> error("unexpected message type")
-          is IncomingMessageType.RemoteDeleteMessage -> {
-            val targetTimestamp = incomingMsgType.targetSentTimestamp
+        maybeGroupSemaphore.withPermit {
+          val replyMessageTimestamp by lazy { System.currentTimeMillis() }
+          val latexBodyInput: String
+          when (incomingMsgType) {
+            IncomingMessageType.InvalidMessage -> error("unexpected message type")
+            is IncomingMessageType.RemoteDeleteMessage -> {
+              val targetTimestamp = incomingMsgType.targetSentTimestamp
 
-            println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
-            delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
-            val timestampOfOurMsgToDelete = dbWrapper.db.requestQueries
-              .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
-              .executeAsOneOrNull()
-              ?.replyMessageTimestamp
-            if (timestampOfOurMsgToDelete != null) {
-              sendSemaphore.withPermit {
-                runInterruptible { signal.remoteDelete(replyRecipient, timestampOfOurMsgToDelete) }
-              }
-              println(
-                "handled remote delete message from $requestId, " +
-                  "targetTimestamp: $targetTimestamp. found the history entry"
-              )
-            } else {
-              println(
-                "unable to handle remote delete message from $requestId, " +
-                  "targetTimestamp: $targetTimestamp. can't find the history entry"
-              )
-            }
-            return@withLockAndContext
-          }
-          is IncomingMessageType.LatexRequestMessage -> latexBodyInput = incomingMsgType.latexText
-        }
-
-        var timedOut = false
-        var sentReply = true
-        try {
-          println("received LaTeX request $requestId")
-
-          val rateLimitStatus = RateLimitStatus.getStatus(
-            dbWrapper.db,
-            identifier,
-            incomingMsgType,
-            incomingMessage,
-            secureKotlinRandom
-          )
-
-          if (rateLimitStatus !is RateLimitStatus.Blocked.WithNoReply) {
-            // Refresh the group's info if this is a group. This ensures group state is accurate during
-            // sends. For example, if our member list copy is out of date, some members might not get our
-            // message.
-            incomingMessage.data.dataMessage?.groupV2?.let { groupInfo ->
-              val groupId = groupInfo.id ?: return@let
-              groupUpdateMutex.withLock {
-                val now = System.currentTimeMillis().milliseconds
-                val lastUpdateTime: Duration? = groupIdToLastUpdateTimestampCache[groupId]
-                val durationSinceLastUpdate = (lastUpdateTime ?: now) durationBetween now
-                if (lastUpdateTime == null || durationSinceLastUpdate >= GROUP_REFRESH_INTERVAL) {
-                  println("refreshing info of groupId $groupId (durationSinceLastUpdate: $durationSinceLastUpdate)")
-                  try {
-                    runInterruptible { signal.getGroup(groupId) }
-                  } catch (e: IOException) {
-                    System.err.println(
-                      "failed to refresh info of groupId $groupId: " + e.stackTraceToString()
-                    )
-                  }
-                  groupIdToLastUpdateTimestampCache[groupId] = System.currentTimeMillis().milliseconds
-                } else {
-                  val durationLeft = durationSinceLastUpdate durationBetween GROUP_REFRESH_INTERVAL
-                  println(
-                    "skipping refresh of info of groupId $groupId; " +
-                      "too early (duration left: $durationLeft)"
-                  )
+              println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
+              delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
+              val timestampOfOurMsgToDelete = dbWrapper.db.requestQueries
+                .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
+                .executeAsOneOrNull()
+                ?.replyMessageTimestamp
+              if (timestampOfOurMsgToDelete != null) {
+                sendSemaphore.withPermit {
+                  runInterruptible { signal.remoteDelete(replyRecipient, timestampOfOurMsgToDelete) }
                 }
-              }
-            }
-          }
-
-          val sendDelay: Long
-          when (rateLimitStatus) {
-            is RateLimitStatus.Blocked -> {
-              when (rateLimitStatus) {
-                is RateLimitStatus.Blocked.WithNoReply -> {
-                  println("blocking request $requestId (${rateLimitStatus.reason})")
-                  sentReply = false
-                }
-                is RateLimitStatus.Blocked.WithTryAgainReply -> {
-                  println(
-                    "blocking request $requestId (${rateLimitStatus.reason}) and sending a try again"
-                  )
-                  sendReadReceipt(source, msgId)
-                  sendTypingAfterDelay(replyRecipient)
-
-                  sendMessage(
-                    Reply.TryAgainMessage(
-                      requestId = requestId,
-                      replyRecipient = replyRecipient,
-                      originalMessage = incomingMessage,
-                      delay = rateLimitStatus.sendDelay,
-                      replyTimestamp = replyMessageTimestamp,
-                      retryAfterTimestamp = rateLimitStatus.retryAfterTimestamp,
-                      currentTimestampUsed = rateLimitStatus.currentTimestampUsed
-                    )
-                  )
-                }
-                is RateLimitStatus.Blocked.WithRejectionReply -> {
-                  println(
-                    "blocking request $requestId (${rateLimitStatus.reason}) and sending back error"
-                  )
-                  sendReadReceipt(source, msgId)
-                  sendTypingAfterDelay(replyRecipient)
-
-                  sendMessage(
-                    Reply.Error(
-                      requestId = requestId,
-                      replyRecipient = replyRecipient,
-                      originalMessage = incomingMessage,
-                      delay = rateLimitStatus.sendDelay,
-                      replyTimestamp = replyMessageTimestamp,
-                      errorMessage = rateLimitStatus.reason
-                    )
-                  )
-                }
+                println(
+                  "handled remote delete message from $requestId, " +
+                    "targetTimestamp: $targetTimestamp. found the history entry"
+                )
+              } else {
+                println(
+                  "unable to handle remote delete message from $requestId, " +
+                    "targetTimestamp: $targetTimestamp. can't find the history entry"
+                )
               }
               return@withLockAndContext
             }
-            is RateLimitStatus.Allowed -> {
-              sendReadReceipt(source, msgId)
-              sendTypingAfterDelay(replyRecipient)
-              sendDelay = rateLimitStatus.sendDelay
-            }
+            is IncomingMessageType.LatexRequestMessage -> latexBodyInput = incomingMsgType.latexText
           }
 
-          val latexImageFile = File(outputPhotoDir, "${requestId.timestamp}.png")
-            .apply { deleteOnExit() }
-          val latexImagePath: String? = try {
-            val genMark = TimeSource.Monotonic.markNow()
-            latexGenerationSemaphore.withPermit {
-              println("generating LaTeX for request $requestId")
-              withNewThreadAndTimeoutOrNull(
-                timeoutMillis = LATEX_GENERATION_TIMEOUT_MILLIS,
-                threadGroup = latexGenerationThreadGroup
-              ) {
-                latexImageFile
-                  .also { outFile -> latexGenerator.writeLatexToPng(latexBodyInput, outFile) }
-                  .apply { addPosixPermissions(PosixFilePermission.GROUP_READ) }
-                  .absolutePath
+          var timedOut = false
+          var sentReply = true
+          try {
+            println("received LaTeX request $requestId")
+
+            val rateLimitStatus = RateLimitStatus.getStatus(
+              dbWrapper.db,
+              identifier,
+              incomingMsgType,
+              incomingMessage,
+              secureKotlinRandom
+            )
+
+            if (rateLimitStatus !is RateLimitStatus.Blocked.WithNoReply) {
+              // Refresh the group's info if this is a group. This ensures group state is accurate during
+              // sends. For example, if our member list copy is out of date, some members might not get our
+              // message.
+              incomingMessage.data.dataMessage?.groupV2?.let { groupInfo ->
+                val groupId = groupInfo.id ?: return@let
+                groupUpdateMutex.withLock {
+                  val now = System.currentTimeMillis().milliseconds
+                  val lastUpdateTime: Duration? = groupIdToLastUpdateTimestampCache[groupId]
+                  val durationSinceLastUpdate = (lastUpdateTime ?: now) durationBetween now
+                  if (lastUpdateTime == null || durationSinceLastUpdate >= GROUP_REFRESH_INTERVAL) {
+                    println("refreshing info of groupId $groupId (durationSinceLastUpdate: $durationSinceLastUpdate)")
+                    try {
+                      runInterruptible { signal.getGroup(groupId) }
+                    } catch (e: IOException) {
+                      System.err.println(
+                        "failed to refresh info of groupId $groupId: " + e.stackTraceToString()
+                      )
+                    }
+                    groupIdToLastUpdateTimestampCache[groupId] = System.currentTimeMillis().milliseconds
+                  } else {
+                    val durationLeft = durationSinceLastUpdate durationBetween GROUP_REFRESH_INTERVAL
+                    println(
+                      "skipping refresh of info of groupId $groupId; " +
+                        "too early (duration left: $durationLeft)"
+                    )
+                  }
+                }
               }
-            }.also { println("LaTeX request $requestId took ${genMark.elapsedNow()}") }
-          } catch (e: OutOfMemoryError) {
-            // TODO: When we switch to Podman containers, remove this since memory usage during generation
-            //  will be restricted by Podman
-            System.err.println("Failed to parse LaTeX for request $requestId: (OutOfMemoryError)")
-            timedOut = true
-            sendMessage(
-              Reply.Error(
-                requestId = requestId,
-                replyRecipient = replyRecipient,
-                originalMessage = incomingMessage,
-                delay = sendDelay,
-                replyTimestamp = replyMessageTimestamp,
-                errorMessage = "Failed to parse LaTeX: Timed out"
-              )
-            )
-            throw e
-          } catch (e: Exception) {
-            System.err.println("Failed to parse LaTeX for request $requestId: ${e.stackTraceToString()}")
-            latexImageFile.delete()
-            val errorReplyMessage = if (e is ParseException && !e.message.isNullOrBlank()) {
-              "Failed to parse LaTeX: ${e.message}"
-            } else {
-              "Failed to parse LaTeX: Miscellaneous error"
             }
 
-            sendMessage(
-              Reply.Error(
-                requestId = requestId,
-                replyRecipient = replyRecipient,
-                originalMessage = incomingMessage,
-                delay = sendDelay,
-                replyTimestamp = replyMessageTimestamp,
-                errorMessage = errorReplyMessage
-              )
-            )
-            // propagate coroutine cancellation
-            if (e is CancellationException) throw e
-            return@withLockAndContext
-          }
+            val sendDelay: Long
+            when (rateLimitStatus) {
+              is RateLimitStatus.Blocked -> {
+                when (rateLimitStatus) {
+                  is RateLimitStatus.Blocked.WithNoReply -> {
+                    println("blocking request $requestId (${rateLimitStatus.reason})")
+                    sentReply = false
+                  }
+                  is RateLimitStatus.Blocked.WithTryAgainReply -> {
+                    println(
+                      "blocking request $requestId (${rateLimitStatus.reason}) and sending a try again"
+                    )
+                    sendReadReceipt(source, msgId)
+                    sendTypingAfterDelay(replyRecipient)
 
-          if (latexImagePath != null) {
-            System.err.println("LaTeX request $requestId has size ${latexImageFile.length()} bytes")
-            if (latexImageFile.length() <= MAX_LATEX_IMAGE_SIZE_BYTES) {
-              sendMessage(
-                Reply.LatexReply(
-                  requestId = requestId,
-                  replyRecipient = replyRecipient,
-                  originalMessage = incomingMessage,
-                  delay = sendDelay,
-                  replyTimestamp = replyMessageTimestamp,
-                  latexImagePath = latexImagePath
-                )
-              )
-            } else {
-              System.err.println("LaTeX request $requestId is too large")
-              latexImageFile.delete()
+                    sendMessage(
+                      Reply.TryAgainMessage(
+                        requestId = requestId,
+                        replyRecipient = replyRecipient,
+                        originalMessage = incomingMessage,
+                        delay = rateLimitStatus.sendDelay,
+                        replyTimestamp = replyMessageTimestamp,
+                        retryAfterTimestamp = rateLimitStatus.retryAfterTimestamp,
+                        currentTimestampUsed = rateLimitStatus.currentTimestampUsed
+                      )
+                    )
+                  }
+                  is RateLimitStatus.Blocked.WithRejectionReply -> {
+                    println(
+                      "blocking request $requestId (${rateLimitStatus.reason}) and sending back error"
+                    )
+                    sendReadReceipt(source, msgId)
+                    sendTypingAfterDelay(replyRecipient)
+
+                    sendMessage(
+                      Reply.Error(
+                        requestId = requestId,
+                        replyRecipient = replyRecipient,
+                        originalMessage = incomingMessage,
+                        delay = rateLimitStatus.sendDelay,
+                        replyTimestamp = replyMessageTimestamp,
+                        errorMessage = rateLimitStatus.reason
+                      )
+                    )
+                  }
+                }
+                return@withLockAndContext
+              }
+              is RateLimitStatus.Allowed -> {
+                sendReadReceipt(source, msgId)
+                sendTypingAfterDelay(replyRecipient)
+                sendDelay = rateLimitStatus.sendDelay
+              }
+            }
+
+            val latexImageFile = File(outputPhotoDir, "${requestId.timestamp}.png")
+              .apply { deleteOnExit() }
+            val latexImagePath: String? = try {
+              val genMark = TimeSource.Monotonic.markNow()
+              latexGenerationSemaphore.withPermit {
+                println("generating LaTeX for request $requestId")
+                withNewThreadAndTimeoutOrNull(
+                  timeoutMillis = LATEX_GENERATION_TIMEOUT_MILLIS,
+                  threadGroup = latexGenerationThreadGroup
+                ) {
+                  latexImageFile
+                    .also { outFile -> latexGenerator.writeLatexToPng(latexBodyInput, outFile) }
+                    .apply { addPosixPermissions(PosixFilePermission.GROUP_READ) }
+                    .absolutePath
+                }
+              }.also { println("LaTeX request $requestId took ${genMark.elapsedNow()}") }
+            } catch (e: OutOfMemoryError) {
+              // TODO: When we switch to Podman containers, remove this since memory usage during generation
+              //  will be restricted by Podman
+              System.err.println("Failed to parse LaTeX for request $requestId: (OutOfMemoryError)")
+              timedOut = true
               sendMessage(
                 Reply.Error(
                   requestId = requestId,
@@ -665,39 +640,91 @@ class MessageProcessor(
                   originalMessage = incomingMessage,
                   delay = sendDelay,
                   replyTimestamp = replyMessageTimestamp,
-                  errorMessage = "Failed to parse LaTeX: Resulting image is too large"
+                  errorMessage = "Failed to parse LaTeX: Timed out"
+                )
+              )
+              throw e
+            } catch (e: Exception) {
+              System.err.println("Failed to parse LaTeX for request $requestId: ${e.stackTraceToString()}")
+              latexImageFile.delete()
+              val errorReplyMessage = if (e is ParseException && !e.message.isNullOrBlank()) {
+                "Failed to parse LaTeX: ${e.message}"
+              } else {
+                "Failed to parse LaTeX: Miscellaneous error"
+              }
+
+              sendMessage(
+                Reply.Error(
+                  requestId = requestId,
+                  replyRecipient = replyRecipient,
+                  originalMessage = incomingMessage,
+                  delay = sendDelay,
+                  replyTimestamp = replyMessageTimestamp,
+                  errorMessage = errorReplyMessage
+                )
+              )
+              // propagate coroutine cancellation
+              if (e is CancellationException) throw e
+              return@withLockAndContext
+            }
+
+            if (latexImagePath != null) {
+              System.err.println("LaTeX request $requestId has size ${latexImageFile.length()} bytes")
+              if (latexImageFile.length() <= MAX_LATEX_IMAGE_SIZE_BYTES) {
+                sendMessage(
+                  Reply.LatexReply(
+                    requestId = requestId,
+                    replyRecipient = replyRecipient,
+                    originalMessage = incomingMessage,
+                    delay = sendDelay,
+                    replyTimestamp = replyMessageTimestamp,
+                    latexImagePath = latexImagePath
+                  )
+                )
+              } else {
+                System.err.println("LaTeX request $requestId is too large")
+                latexImageFile.delete()
+                sendMessage(
+                  Reply.Error(
+                    requestId = requestId,
+                    replyRecipient = replyRecipient,
+                    originalMessage = incomingMessage,
+                    delay = sendDelay,
+                    replyTimestamp = replyMessageTimestamp,
+                    errorMessage = "Failed to parse LaTeX: Resulting image is too large"
+                  )
+                )
+              }
+            } else {
+              System.err.println("LaTeX request $requestId timed out")
+              latexImageFile.delete()
+              timedOut = true
+              sendMessage(
+                Reply.Error(
+                  requestId = requestId,
+                  replyRecipient = replyRecipient,
+                  originalMessage = incomingMessage,
+                  delay = sendDelay,
+                  replyTimestamp = replyMessageTimestamp,
+                  errorMessage = "Failed to parse LaTeX: Timed out"
                 )
               )
             }
-          } else {
-            System.err.println("LaTeX request $requestId timed out")
-            latexImageFile.delete()
-            timedOut = true
-            sendMessage(
-              Reply.Error(
-                requestId = requestId,
-                replyRecipient = replyRecipient,
-                originalMessage = incomingMessage,
-                delay = sendDelay,
-                replyTimestamp = replyMessageTimestamp,
-                errorMessage = "Failed to parse LaTeX: Timed out"
-              )
+          } finally {
+            dbWrapper.db.requestQueries.insert(
+              userId = identifier,
+              serverReceiveTimestamp = serverReceiveTimestamp,
+              clientSentTimestamp = msgId,
+              replyMessageTimestamp = if (sentReply) replyMessageTimestamp else null,
+              timedOut = timedOut,
+              // Encrypt the LaTeX for requests that took too long for abuse monitoring.
+              latexCiphertext = if (timedOut) {
+                LatexCiphertext.fromPlaintext(botConfig, incomingMsgType.latexText, identifier)
+              } else {
+                null
+              }
             )
           }
-        } finally {
-          dbWrapper.db.requestQueries.insert(
-            userId = identifier,
-            serverReceiveTimestamp = serverReceiveTimestamp,
-            clientSentTimestamp = msgId,
-            replyMessageTimestamp = if (sentReply) replyMessageTimestamp else null,
-            timedOut = timedOut,
-            // Encrypt the LaTeX for requests that took too long for abuse monitoring.
-            latexCiphertext = if (timedOut) {
-              LatexCiphertext.fromPlaintext(botConfig, incomingMsgType.latexText, identifier)
-            } else {
-              null
-            }
-          )
         }
       }
     }
@@ -1091,6 +1118,15 @@ class MessageProcessor(
   override fun close() {
     processorScope.cancel("close() was called")
   }
+}
+
+@JvmInline
+value class NullableSemaphore(val semaphore: Semaphore?) {
+  /**
+   * Executes the given action. If the [semaphore] is not null, a permit is acquired from the [semaphore] at the
+   * beginning and released after the action is completed.
+   */
+  suspend inline fun <T> withPermit(action: () -> T) = semaphore?.withPermit { action() } ?: action()
 }
 
 infix fun Duration.durationBetween(other: Duration) = (this - other).absoluteValue
