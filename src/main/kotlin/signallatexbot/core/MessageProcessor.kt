@@ -1022,7 +1022,7 @@ class MessageProcessor(
             append("successfully handled LaTeX request ${reply.requestId} to a group")
           } else {
             append("partially sent LaTeX request ${reply.requestId} ")
-            append("$successes / ${sendResponse.results} messages)")
+            append("$successes / ${sendResponse.results.size} messages)")
           }
         }
         if (isRetry) {
