@@ -1003,7 +1003,7 @@ class MessageProcessor(
 
       val sendResponse: SendResponse = sendMessageToSignald()
 
-      fun getResultString(sendResponse: SendResponse, isRetry: Boolean) = buildString {
+      suspend fun getResultString(sendResponse: SendResponse, isRetry: Boolean) = buildString {
         val successes = sendResponse.results.count { it.success != null }
         if (sendResponse.results.size == 1) {
           if (successes == 1) {
@@ -1022,7 +1022,30 @@ class MessageProcessor(
             append("successfully handled LaTeX request ${reply.requestId} to a group")
           } else {
             append("partially sent LaTeX request ${reply.requestId} ")
-            append("$successes / ${sendResponse.results.size} messages)")
+            append("($successes / ${sendResponse.results.size} messages)")
+
+            data class FailureInfo(
+              val identifier: UserIdentifier?,
+              val errorMessage: String,
+            )
+
+            val failureInfo: ArrayList<FailureInfo> = sendResponse.results.asSequence()
+              .filter { it.success == null }
+              .fold(ArrayList(sendResponse.results.size - successes)) { failureList, currentFailure ->
+                val identifier = currentFailure.address?.let { addressToIdentifierCache.get(it) }
+                val errorMessage = with(currentFailure) {
+                  when {
+                    networkFailure == true -> "network failure"
+                    identityFailure != null -> "identity failure: $identityFailure"
+                    unregisteredFailure == true -> "unregistered failure"
+                    proofRequiredFailure != null -> "proof required failure: $proofRequiredFailure"
+                    else -> "unknown failure"
+                  }
+                }
+                failureList.add(FailureInfo(identifier, errorMessage))
+                failureList
+              }
+            append(", $failureInfo")
           }
         }
         if (isRetry) {
@@ -1033,6 +1056,7 @@ class MessageProcessor(
 
       val successes = sendResponse.results.count { it.success != null }
       if (successes != sendResponse.results.size) {
+
         println("Attempting to handle any identity failures (safety number changes)")
 
         data class IdentityTrustResults(val address: JsonAddress, val trustSuccessful: Boolean)
