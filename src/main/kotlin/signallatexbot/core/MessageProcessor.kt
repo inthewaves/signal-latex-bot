@@ -1031,7 +1031,7 @@ class MessageProcessor(
 
             val failureInfo: ArrayList<FailureInfo> = sendResponse.results.asSequence()
               .filter { it.success == null }
-              .fold(ArrayList(sendResponse.results.size - successes)) { failureList, currentFailure ->
+              .mapTo(ArrayList(sendResponse.results.size - successes)) { currentFailure ->
                 val identifier = currentFailure.address?.let { addressToIdentifierCache.get(it) }
                 val errorMessage = with(currentFailure) {
                   when {
@@ -1042,8 +1042,7 @@ class MessageProcessor(
                     else -> "unknown failure"
                   }
                 }
-                failureList.add(FailureInfo(identifier, errorMessage))
-                failureList
+                FailureInfo(identifier, errorMessage)
               }
             append(", $failureInfo")
           }
