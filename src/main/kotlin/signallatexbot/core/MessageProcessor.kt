@@ -24,6 +24,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.inthewaves.kotlinsignald.Fingerprint
 import org.inthewaves.kotlinsignald.Recipient
 import org.inthewaves.kotlinsignald.Signal
@@ -35,6 +36,7 @@ import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ClientMessageWr
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingException
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.InternalError
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAddress
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
@@ -297,17 +299,21 @@ class MessageProcessor(
   private val lastTrustAllAttemptTimestamp = AtomicLong(0L)
   private val trustAllMutex = Mutex()
 
-  private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Unit = trustAllMutex.withLock {
+  /**
+   * Returns whether the trust all ran and if any keys were trusted
+   */
+  private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Boolean = trustAllMutex.withLock {
     if (!bypassTimeCheck) {
       val now = System.currentTimeMillis()
       if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
         println("Not trusting identity keys --- too early")
-        return
+        return false
       }
       lastTrustAllAttemptTimestamp.set(now)
     }
 
     println("Trusting all untrusted identity keys")
+    var anyKeysTrusted = false
     runInterruptible { signal.getAllIdentities() }
       .identityKeys
       .asSequence()
@@ -329,6 +335,7 @@ class MessageProcessor(
                 signal.trust(address, fingerprint, TrustLevel.TRUSTED_UNVERIFIED)
               }
               println("trusted an identity key for ${addressToIdentifierCache.get(address)}")
+              anyKeysTrusted = true
             } catch (e: SignaldException) {
               System.err.println(
                 "unable to trust an identity key for ${addressToIdentifierCache.get(address)}"
@@ -336,6 +343,7 @@ class MessageProcessor(
             }
           }
       }
+    anyKeysTrusted
   }
 
   private suspend fun handleExceptionMessage(message: ClientMessageWrapper) {
@@ -345,8 +353,14 @@ class MessageProcessor(
           .also { if (it) System.err.println("ExceptionWrapper has ProtocolUntrustedIdentityException") }
       }
       is IncomingException -> {
-        (message.typedException is UntrustedIdentityError)
-          .also { if (it) System.err.println("IncomingException is UntrustedIdentityError") }
+        when (val exception = message.typedException) {
+          is UntrustedIdentityError -> true
+          is InternalError -> {
+            exception.message?.contains("UntrustedIdentityException") == true ||
+              exception.exceptions.contains("org.whispersystems.libsignal.UntrustedIdentityException")
+          }
+          else -> false
+        }
       }
       else -> false
     }
@@ -355,6 +369,7 @@ class MessageProcessor(
       // If a user's safety number changes, their incoming messages will just be received as
       // "org.signal.libsignal.metadata.ProtocolUntrustedIdentityException" as the message. We may never be able
       // to get their actual messages until we trust their new identity key(s).
+      // In case signald starts actually typing these exceptions,
       val exception = (message as? IncomingException)?.typedException
       if (exception is UntrustedIdentityError && exception.identifier != null) {
         val identifier = exception.identifier!!
@@ -1060,17 +1075,20 @@ class MessageProcessor(
 
         data class IdentityTrustResults(val address: JsonAddress, val trustSuccessful: Boolean)
 
-        val usersRetrustedSuccessfully: List<JsonAddress> = sendResponse.results.asFlow()
+        val identityFailureAddresses: List<JsonAddress> = sendResponse.results.asSequence()
           .filter { sendResult ->
             val isValidAddress = sendResult.address?.uuid != null || sendResult.address?.number != null
             sendResult.identityFailure != null && isValidAddress
           }
           .map { it.address }
           .filterNotNull()
+          .toList()
+
+        val usersRetrustedSuccessfully: List<JsonAddress> = identityFailureAddresses
+          .asFlow()
           .map { address ->
             val identifier = addressToIdentifierCache.get(address)
-            println("trusting identities for $identifier")
-
+            println("beginning to trust identities for $identifier ($address)")
             val identities = try {
               runInterruptible { signal.getIdentities(address).identities }
             } catch (e: SignaldException) {
@@ -1078,6 +1096,7 @@ class MessageProcessor(
               return@map null
             }
 
+            println("identities: $identities")
             val identityFailuresHandled = identities.asSequence()
               .filter {
                 it.trustLevel == "UNTRUSTED" && (it.safetyNumber != null || it.qrCodeData != null)
@@ -1110,21 +1129,38 @@ class MessageProcessor(
           .map { it.address }
           .toList()
 
-        if (usersRetrustedSuccessfully.isNotEmpty()) {
-          when (reply.replyRecipient) {
+        suspend fun sendRetry(groupUsersToResendTo: List<JsonAddress>) {
+          val retrySendResponse = when (reply.replyRecipient) {
             is Recipient.Group -> {
               println("retrying group message after new identity keys trusted")
-              val retrySendResponse = sendMessageToSignald(
-                retryGroupMemberSubset = usersRetrustedSuccessfully
-              )
-              println(getResultString(retrySendResponse, isRetry = true))
+              sendMessageToSignald(retryGroupMemberSubset = groupUsersToResendTo)
             }
             is Recipient.Individual -> {
               println("retrying message after new identity keys trusted")
-              val retrySendResponse = sendMessageToSignald()
-              println(getResultString(retrySendResponse, isRetry = true))
+              sendMessageToSignald()
             }
           }
+          println(getResultString(retrySendResponse, isRetry = true))
+        }
+
+        if (identityFailureAddresses.size != usersRetrustedSuccessfully.size) {
+          println(
+            "did not trust all identities despite having ${identityFailureAddresses.size} identity failures; " +
+              "only trusted ${usersRetrustedSuccessfully.size}. launching trust all job"
+          )
+          val anyKeysTrusted = withTimeoutOrNull(10.seconds) {
+            // make this continue to run even if timed out
+            processorScope
+              .async { trustAllUntrustedIdentityKeys() }
+              .await()
+          } ?: false
+          if (anyKeysTrusted) {
+            sendRetry(identityFailureAddresses)
+          } else {
+            println("failed to trust any keys")
+          }
+        } else if (usersRetrustedSuccessfully.isNotEmpty()) {
+          sendRetry(usersRetrustedSuccessfully)
         }
       }
     } finally {
