@@ -41,11 +41,11 @@ repositories {
 
 dependencies {
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.3.2")
-  implementation("org.inthewaves.kotlin-signald:client-coroutines:0.19.1+signald-0.15.0-43-cd821ab5")
+  implementation("org.inthewaves.kotlin-signald:client-coroutines:0.21.0+signald-0.16.1-10-1e470457")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.0")
   implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
   implementation("org.scilab.forge:jlatexmath:1.0.7")
-  implementation("com.github.ajalt.clikt:clikt:3.3.0")
+  implementation("com.github.ajalt.clikt:clikt:3.4.0")
   implementation("com.google.crypto.tink:tink:1.6.1")
 
   implementation("com.squareup.sqldelight:sqlite-driver:1.5.3")

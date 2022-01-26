@@ -30,7 +30,6 @@ import org.inthewaves.kotlinsignald.Recipient
 import org.inthewaves.kotlinsignald.Signal
 import org.inthewaves.kotlinsignald.TrustLevel
 import org.inthewaves.kotlinsignald.clientprotocol.SignaldException
-import org.inthewaves.kotlinsignald.clientprotocol.v0.structures.JsonAttachment
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.Account
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ClientMessageWrapper
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ExceptionWrapper
@@ -38,6 +37,7 @@ import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingExcepti
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.IncomingMessage
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.InternalError
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAddress
+import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonAttachment
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.JsonQuote
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.ListenerState
 import org.inthewaves.kotlinsignald.clientprotocol.v1.structures.SendResponse
