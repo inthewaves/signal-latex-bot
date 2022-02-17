@@ -5,7 +5,7 @@ plugins {
   kotlin("plugin.serialization") version "1.6.10"
   id("com.squareup.sqldelight") version "1.5.3"
   id("org.jlleitschuh.gradle.ktlint") version "10.2.1"
-  id("org.jlleitschuh.gradle.ktlint-idea") version "10.2.0"
+  id("org.jlleitschuh.gradle.ktlint-idea") version "10.2.1"
   application
 }
 
@@ -41,7 +41,7 @@ repositories {
 
 dependencies {
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.3.2")
-  implementation("org.inthewaves.kotlin-signald:client-coroutines:0.21.0+signald-0.16.1-10-1e470457")
+  implementation("org.inthewaves.kotlin-signald:client-coroutines:0.22.0+signald-0.17.0-1-5a6f8a4b")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.0")
   implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
   implementation("org.scilab.forge:jlatexmath:1.0.7")
