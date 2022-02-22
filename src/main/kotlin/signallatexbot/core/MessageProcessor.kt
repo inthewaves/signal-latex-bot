@@ -966,6 +966,12 @@ class MessageProcessor(
 
   private suspend fun sendMessage(reply: Reply): Unit = sendSemaphore.withPermit {
     try {
+      try {
+        runInterruptible { signal.typing(reply.replyRecipient, isTyping = false) }
+      } catch (e: SignaldException) {
+        System.err.println("failed to send read receipt / typing indicator: ${e.stackTraceToString()}")
+      }
+
       val originalMsgData: IncomingMessage.Data = reply.originalMessage.data
       println("replying to request ${reply.requestId} (${reply::class.simpleName}) after a ${reply.delay} ms delay")
       delay(reply.delay)
