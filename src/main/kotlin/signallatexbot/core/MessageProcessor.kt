@@ -75,6 +75,7 @@ import kotlin.random.asKotlinRandom
 import kotlin.random.nextLong
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
@@ -106,7 +107,7 @@ private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4L
 
 private const val MAX_EXTRA_SEND_DELAY_SECONDS = 10.0
 
-private val GROUP_REFRESH_INTERVAL = 30.seconds
+private val GROUP_REFRESH_INTERVAL = 2.minutes
 
 class MessageProcessor(
   private val signal: Signal,
