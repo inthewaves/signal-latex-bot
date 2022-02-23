@@ -90,6 +90,7 @@ val GROUP_COMMAND_PREFIX_REGEX = Regex(
 private const val SALT_FILENAME = "identifier-hash-salt"
 private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
 private val REPLY_DELAY_RANGE_MILLIS = 250L..1000L
+private val NETWORK_FAILURE_INSTANT_RETRY_DELAY_RANGE_MILLIS = TimeUnit.SECONDS.toMillis(2)..TimeUnit.SECONDS.toMillis(4)
 private const val LATEX_GENERATION_TIMEOUT_MILLIS = 4000L
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
@@ -962,6 +963,45 @@ class MessageProcessor(
     }
   }
 
+  /**
+   * Sending with network failure retry because SKDM failure can result in full group send failure with fake network
+   * errors
+   *
+   * @throws SignaldException
+   */
+  private suspend fun runWithDelayedNetworkFailureRetryForGroups(
+    recipient: Recipient,
+    sendingBlock: (thisRecipient: Recipient) -> SendResponse,
+  ): SendResponse {
+    val firstAttemptResponse = runInterruptible { sendingBlock(recipient) }
+    if (recipient !is Recipient.Group) {
+      return firstAttemptResponse
+    }
+
+    val networkFailureAddresses = firstAttemptResponse.results.asSequence()
+      .filter { it.networkFailure == true }
+      .mapNotNull { it.address }
+      .toList()
+    return if (networkFailureAddresses.isNotEmpty()) {
+      val delayMillis = secureKotlinRandom.nextLong(NETWORK_FAILURE_INSTANT_RETRY_DELAY_RANGE_MILLIS)
+      System.err.println(
+        "Ran into ${networkFailureAddresses.size} network failures; attempting a retry after $delayMillis ms"
+      )
+      delay(delayMillis)
+      val secondAttemptResponse = runInterruptible {
+        sendingBlock(recipient.withMemberSubset(networkFailureAddresses))
+      }
+      secondAttemptResponse.copy(
+        results = secondAttemptResponse.results.toMutableList()
+          .apply {
+            addAll(firstAttemptResponse.results.asSequence().filter { it.address !in networkFailureAddresses })
+          }
+      )
+    } else {
+      firstAttemptResponse
+    }
+  }
+
   private val sendSemaphore = Semaphore(permits = MAX_CONCURRENT_MSG_SENDS)
 
   private suspend fun sendMessage(reply: Reply): Unit = sendSemaphore.withPermit {
@@ -976,49 +1016,53 @@ class MessageProcessor(
       println("replying to request ${reply.requestId} (${reply::class.simpleName}) after a ${reply.delay} ms delay")
       delay(reply.delay)
 
-      fun sendErrorMessage(errorReply: Reply.ErrorReply, recipient: Recipient): SendResponse {
-        println(
-          "sending LaTeX request failure for ${errorReply.requestId}; " +
-            "Failure message: [${errorReply.errorMessage}]"
-        )
-        return signal.send(
-          recipient = recipient,
-          messageBody = errorReply.errorMessage,
-          quote = JsonQuote(
-            id = originalMsgData.timestamp,
-            author = originalMsgData.source,
-            text = originalMsgData.dataMessage?.body,
-            mentions = originalMsgData.dataMessage?.mentions ?: emptyList()
-          ),
-          timestamp = errorReply.replyTimestamp
-        )
-      }
-
       suspend fun sendMessageToSignald(
         retryGroupMemberSubset: List<JsonAddress> = emptyList()
-      ): SendResponse = runInterruptible {
+      ): SendResponse {
         val recipient = if (reply.replyRecipient is Recipient.Group && retryGroupMemberSubset.isNotEmpty()) {
           (reply.replyRecipient as Recipient.Group).withMemberSubset(retryGroupMemberSubset)
         } else {
           reply.replyRecipient
         }
 
-        when (reply) {
-          is Reply.Error -> sendErrorMessage(reply, recipient)
-          is Reply.TryAgainMessage -> sendErrorMessage(reply, recipient)
-          is Reply.LatexReply -> {
+        suspend fun sendErrorMessage(errorReply: Reply.ErrorReply, recipient: Recipient): SendResponse {
+          println(
+            "sending LaTeX request failure for ${errorReply.requestId}; " +
+              "Failure message: [${errorReply.errorMessage}]"
+          )
+          return runWithDelayedNetworkFailureRetryForGroups(recipient) { thisRecipient ->
             signal.send(
-              recipient = recipient,
-              messageBody = "",
-              attachments = listOf(JsonAttachment(filename = reply.latexImagePath)),
+              recipient = thisRecipient,
+              messageBody = errorReply.errorMessage,
               quote = JsonQuote(
                 id = originalMsgData.timestamp,
                 author = originalMsgData.source,
                 text = originalMsgData.dataMessage?.body,
                 mentions = originalMsgData.dataMessage?.mentions ?: emptyList()
               ),
-              timestamp = reply.replyTimestamp
+              timestamp = errorReply.replyTimestamp
             )
+          }
+        }
+
+        return when (reply) {
+          is Reply.Error -> sendErrorMessage(reply, recipient)
+          is Reply.TryAgainMessage -> sendErrorMessage(reply, recipient)
+          is Reply.LatexReply -> {
+            runWithDelayedNetworkFailureRetryForGroups(recipient) { thisRecipient ->
+              signal.send(
+                recipient = thisRecipient,
+                messageBody = "",
+                attachments = listOf(JsonAttachment(filename = reply.latexImagePath)),
+                quote = JsonQuote(
+                  id = originalMsgData.timestamp,
+                  author = originalMsgData.source,
+                  text = originalMsgData.dataMessage?.body,
+                  mentions = originalMsgData.dataMessage?.mentions ?: emptyList()
+                ),
+                timestamp = reply.replyTimestamp
+              )
+            }
           }
         }
       }
