@@ -27,6 +27,8 @@ RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
+# JVM status on SIGTERM
+SuccessExitStatus=143
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
