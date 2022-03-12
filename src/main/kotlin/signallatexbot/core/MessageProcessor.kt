@@ -63,7 +63,6 @@ import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.CancellationException
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.resume
@@ -74,6 +73,7 @@ import kotlin.random.Random
 import kotlin.random.asKotlinRandom
 import kotlin.random.nextLong
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -88,27 +88,30 @@ val GROUP_COMMAND_PREFIX_REGEX = Regex(
 )
 
 private const val SALT_FILENAME = "identifier-hash-salt"
-private val TYPING_INDICATOR_START_DELAY_RANGE_MILLIS = 250L..500L
-private val REPLY_DELAY_RANGE_MILLIS = 250L..1000L
-private val NETWORK_FAILURE_INSTANT_RETRY_DELAY_RANGE_MILLIS = TimeUnit.SECONDS.toMillis(2)..TimeUnit.SECONDS.toMillis(4)
-private const val LATEX_GENERATION_TIMEOUT_MILLIS = 4000L
+private val TYPING_INDICATOR_START_DELAY_RANGE = 250.milliseconds..500.milliseconds
+private val REPLY_DELAY_RANGE = 250.milliseconds..1000.milliseconds
+private val NETWORK_FAILURE_INSTANT_RETRY_DELAY_RANGE = 2.seconds..4.seconds
+private val LATEX_GENERATION_TIMEOUT = 4.seconds
 private const val MAX_CONCURRENT_MSG_SENDS = 4
 private const val MAX_CONCURRENT_LATEX_GENERATION = 12
 
 private const val MAX_CONCURRENT_GROUP_PROCESSING = 2
 
-private val HISTORY_PURGE_INTERVAL_MILLIS = TimeUnit.DAYS.toMillis(1)
-private const val MAX_NON_TIMED_OUT_HISTORY_LIFETIME_DAYS = 1L
-private const val MAX_TIMED_OUT_HISTORY_LIFETIME_DAYS = 10L
+private val HISTORY_PURGE_INTERVAL = 1.days
+private val MAX_NON_TIMED_OUT_HISTORY_LIFETIME = 1.days
+private val MAX_TIMED_OUT_HISTORY_LIFETIME = 10.days
 private const val MAX_LATEX_BODY_LENGTH_CHARS = 4096
 private const val MAX_LATEX_IMAGE_SIZE_BYTES = 2_048_576 // 2 MiB
 
 private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_ONE_MINUTE = 15L
 private const val HARD_LIMIT_MESSAGE_COUNT_THRESHOLD_TWENTY_SECONDS = 4L
 
-private const val MAX_EXTRA_SEND_DELAY_SECONDS = 10.0
+private val MAX_EXTRA_SEND_DELAY_SECONDS = 10.seconds
 
 private val GROUP_REFRESH_INTERVAL = 2.minutes
+
+fun Random.nextDuration(range: ClosedRange<Duration>): Duration =
+  nextLong(range.start.inWholeMilliseconds, range.endInclusive.inWholeMilliseconds).milliseconds
 
 class MessageProcessor(
   private val signal: Signal,
@@ -167,10 +170,10 @@ class MessageProcessor(
       val countBefore = count().executeAsOne()
       val now = System.currentTimeMillis()
       deleteNonTimedOutEntriesOlderThan(
-        timestampTarget = now - TimeUnit.DAYS.toMillis(MAX_NON_TIMED_OUT_HISTORY_LIFETIME_DAYS)
+        timestampTarget = now - MAX_NON_TIMED_OUT_HISTORY_LIFETIME.inWholeMilliseconds
       )
       deleteTimedOutEntriesOlderThan(
-        timestampTarget = now - TimeUnit.DAYS.toMillis(MAX_TIMED_OUT_HISTORY_LIFETIME_DAYS)
+        timestampTarget = now - MAX_TIMED_OUT_HISTORY_LIFETIME.inWholeMilliseconds
       )
       val countNow = count().executeAsOne()
       println("pruned ${countBefore - countNow} request history entries")
@@ -188,7 +191,7 @@ class MessageProcessor(
         while (isActive) {
           pruneHistory()
           dbWrapper.doWalCheckpointTruncate()
-          delay(HISTORY_PURGE_INTERVAL_MILLIS)
+          delay(HISTORY_PURGE_INTERVAL)
         }
       }
 
@@ -226,7 +229,7 @@ class MessageProcessor(
           }
 
           System.gc()
-          delay(TimeUnit.MINUTES.toMillis(10L))
+          delay(10.minutes)
         }
       }
 
@@ -307,7 +310,7 @@ class MessageProcessor(
   private suspend fun trustAllUntrustedIdentityKeys(bypassTimeCheck: Boolean = false): Boolean = trustAllMutex.withLock {
     if (!bypassTimeCheck) {
       val now = System.currentTimeMillis()
-      if (now < lastTrustAllAttemptTimestamp.get() + TimeUnit.MINUTES.toMillis(1)) {
+      if (now < lastTrustAllAttemptTimestamp.get() + 1.minutes.inWholeMilliseconds) {
         println("Not trusting identity keys --- too early")
         return false
       }
@@ -506,7 +509,7 @@ class MessageProcessor(
               val targetTimestamp = incomingMsgType.targetSentTimestamp
 
               println("received remote delete request $requestId, targetTimestamp $targetTimestamp")
-              delay(secureKotlinRandom.nextLong(REPLY_DELAY_RANGE_MILLIS))
+              delay(secureKotlinRandom.nextDuration(REPLY_DELAY_RANGE))
               val timestampOfOurMsgToDelete = dbWrapper.db.requestQueries
                 .getReplyTimestamp(userId = identifier, clientSentTimestamp = targetTimestamp)
                 .executeAsOneOrNull()
@@ -574,7 +577,7 @@ class MessageProcessor(
               }
             }
 
-            val sendDelay: Long
+            val sendDelay: Duration
             when (rateLimitStatus) {
               is RateLimitStatus.Blocked -> {
                 when (rateLimitStatus) {
@@ -636,7 +639,7 @@ class MessageProcessor(
               latexGenerationSemaphore.withPermit {
                 println("generating LaTeX for request $requestId")
                 withNewThreadAndTimeoutOrNull(
-                  timeoutMillis = LATEX_GENERATION_TIMEOUT_MILLIS,
+                  timeout = LATEX_GENERATION_TIMEOUT,
                   threadGroup = latexGenerationThreadGroup
                 ) {
                   latexImageFile
@@ -759,7 +762,7 @@ class MessageProcessor(
 
   private suspend fun sendTypingAfterDelay(replyRecipient: Recipient) {
     try {
-      delay(secureKotlinRandom.nextLong(TYPING_INDICATOR_START_DELAY_RANGE_MILLIS))
+      delay(secureKotlinRandom.nextDuration(TYPING_INDICATOR_START_DELAY_RANGE))
       sendSemaphore.withPermit {
         runInterruptible { signal.typing(replyRecipient, isTyping = true) }
       }
@@ -777,25 +780,25 @@ class MessageProcessor(
 
       data class WithTryAgainReply(
         override val reason: String,
-        val sendDelay: Long,
+        val sendDelay: Duration,
         val retryAfterTimestamp: Long,
         val currentTimestampUsed: Long
       ) : Blocked
 
       data class WithRejectionReply(
         override val reason: String,
-        val sendDelay: Long,
+        val sendDelay: Duration,
       ) : Blocked
     }
 
     @JvmInline
-    value class Allowed(val sendDelay: Long) : RateLimitStatus
+    value class Allowed(val sendDelay: Duration) : RateLimitStatus
 
     companion object {
       private fun calculateExtraDelayMillis(numEntriesInLastMinute: Long): Long {
         // t^2 / 25
         val extraSeconds: Double = (numEntriesInLastMinute * numEntriesInLastMinute / 25.0)
-          .coerceAtMost(MAX_EXTRA_SEND_DELAY_SECONDS)
+          .coerceAtMost(MAX_EXTRA_SEND_DELAY_SECONDS.inWholeSeconds.toDouble())
         return (extraSeconds * 1000.0).roundToLong()
           .coerceAtLeast(0L)
       }
@@ -812,48 +815,49 @@ class MessageProcessor(
 
         val entriesWithinLastMinute = database.requestQueries.requestsInInterval(
           userId = identifier,
-          lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
+          lowerTimestamp = serverReceiveTimestamp - 1.minutes.inWholeMilliseconds,
           upperTimestamp = serverReceiveTimestamp
         ).executeAsOne()
         val timedOutEntriesInLastMin = database.requestQueries.timedOutRequestsInInterval(
           userId = identifier,
-          lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
+          lowerTimestamp = serverReceiveTimestamp - 1.minutes.inWholeMilliseconds,
           upperTimestamp = serverReceiveTimestamp
         ).executeAsOne()
 
         val entriesInLastTwentySeconds by lazy {
           database.requestQueries.requestsInInterval(
             userId = identifier,
-            lowerTimestamp = serverReceiveTimestamp - TimeUnit.SECONDS.toMillis(20),
+            lowerTimestamp = serverReceiveTimestamp - 20.seconds.inWholeMilliseconds,
             upperTimestamp = serverReceiveTimestamp
           ).executeAsOne()
         }
 
-        val sendDelayRange: LongRange = if (entriesWithinLastMinute != 0L) {
-          val delayAddition = calculateExtraDelayMillis(entriesWithinLastMinute)
-          REPLY_DELAY_RANGE_MILLIS.let { originalRange ->
-            (originalRange.first + delayAddition)..(originalRange.last + delayAddition)
+        val sendDelayRange: ClosedRange<Duration> = if (entriesWithinLastMinute != 0L) {
+          val delayAddition = calculateExtraDelayMillis(entriesWithinLastMinute).milliseconds
+          REPLY_DELAY_RANGE.let { originalRange ->
+            (originalRange.start + delayAddition)..(originalRange.endInclusive + delayAddition)
           }
         } else {
-          REPLY_DELAY_RANGE_MILLIS
+          REPLY_DELAY_RANGE
         }
-        val sendDelay = secureKotlinRandom.nextLong(sendDelayRange)
+        val sendDelay = secureKotlinRandom.nextDuration(sendDelayRange)
 
         if (timedOutEntriesInLastMin != 0L) {
           val mostRecentTimedOutTimestamp = database
             .requestQueries
             .mostRecentTimedOutRequestTimestampInInterval(
               userId = identifier,
-              lowerTimestamp = serverReceiveTimestamp - TimeUnit.MINUTES.toMillis(1),
+              lowerTimestamp = serverReceiveTimestamp - 1.minutes.inWholeMilliseconds,
               upperTimestamp = serverReceiveTimestamp
             )
             .executeAsOne()
-            .serverReceiveTimestamp!!
+            .serverReceiveTimestamp
+            ?: System.currentTimeMillis()
 
           return Blocked.WithTryAgainReply(
             sendDelay = sendDelay,
             reason = "sent a request that timed out within the last minute",
-            retryAfterTimestamp = mostRecentTimedOutTimestamp + TimeUnit.MINUTES.toMillis(1),
+            retryAfterTimestamp = mostRecentTimedOutTimestamp + 1.minutes.inWholeMilliseconds,
             currentTimestampUsed = serverReceiveTimestamp
           )
         } else if (
@@ -876,23 +880,23 @@ class MessageProcessor(
 
           return if (isAtLimitForLastMinute || isAtLimitForTwentySeconds) {
             val interval = if (isAtLimitForLastMinute) {
-              TimeUnit.MINUTES.toMillis(1)
+              1.minutes
             } else {
-              TimeUnit.SECONDS.toMillis(20)
+              20.seconds
             }
-            val retryAfterTimestamp = database.requestQueries
+            val leastRecentTimestamp = database.requestQueries
               .leastRecentTimestampInInterval(
                 userId = identifier,
-                lowerTimestamp = serverReceiveTimestamp - interval,
+                lowerTimestamp = serverReceiveTimestamp - interval.inWholeMilliseconds,
                 upperTimestamp = serverReceiveTimestamp
               )
               .executeAsOne()
-              .serverReceiveTimestamp!! + interval
+              .serverReceiveTimestamp ?: System.currentTimeMillis()
 
             Blocked.WithTryAgainReply(
               sendDelay = sendDelay,
               reason = reason,
-              retryAfterTimestamp = retryAfterTimestamp,
+              retryAfterTimestamp = leastRecentTimestamp + interval.inWholeMilliseconds,
               currentTimestampUsed = serverReceiveTimestamp
             )
           } else {
@@ -916,7 +920,7 @@ class MessageProcessor(
     val originalMessage: IncomingMessage
     val replyRecipient: Recipient
     val requestId: RequestId
-    val delay: Long
+    val delay: Duration
     val replyTimestamp: Long
 
     sealed interface ErrorReply : Reply {
@@ -927,7 +931,7 @@ class MessageProcessor(
       override val originalMessage: IncomingMessage,
       override val replyRecipient: Recipient,
       override val requestId: RequestId,
-      override val delay: Long,
+      override val delay: Duration,
       override val replyTimestamp: Long,
       val latexImagePath: String
     ) : Reply
@@ -936,7 +940,7 @@ class MessageProcessor(
       override val originalMessage: IncomingMessage,
       override val replyRecipient: Recipient,
       override val requestId: RequestId,
-      override val delay: Long,
+      override val delay: Duration,
       override val replyTimestamp: Long,
       override val errorMessage: String
     ) : ErrorReply
@@ -945,16 +949,16 @@ class MessageProcessor(
       override val originalMessage: IncomingMessage,
       override val replyRecipient: Recipient,
       override val requestId: RequestId,
-      override val delay: Long,
+      override val delay: Duration,
       override val replyTimestamp: Long,
       private val retryAfterTimestamp: Long,
       private val currentTimestampUsed: Long,
     ) : ErrorReply {
       override val errorMessage: String
         get() {
-          val seconds = TimeUnit.MILLISECONDS.toSeconds(retryAfterTimestamp - currentTimestampUsed)
-          return if (seconds >= 4L) {
-            "Too many requests! Try again in $seconds seconds."
+          val durationUntilRetryAllowed = (retryAfterTimestamp - currentTimestampUsed).milliseconds
+          return if (durationUntilRetryAllowed >= 3.seconds) {
+            "Too many requests! Try again in ${durationUntilRetryAllowed.inWholeSeconds} seconds."
           } else {
             // don't bother showing the seconds if it's too short
             "Too many requests! Try again."
@@ -983,11 +987,11 @@ class MessageProcessor(
       .mapNotNull { it.address }
       .toList()
     return if (networkFailureAddresses.isNotEmpty()) {
-      val delayMillis = secureKotlinRandom.nextLong(NETWORK_FAILURE_INSTANT_RETRY_DELAY_RANGE_MILLIS)
+      val delay = secureKotlinRandom.nextDuration(NETWORK_FAILURE_INSTANT_RETRY_DELAY_RANGE)
       System.err.println(
-        "Ran into ${networkFailureAddresses.size} network failures; attempting a retry after $delayMillis ms"
+        "Ran into ${networkFailureAddresses.size} network failures; attempting a retry after $delay"
       )
-      delay(delayMillis)
+      delay(delay)
       val secondAttemptResponse = runInterruptible {
         sendingBlock(recipient.withMemberSubset(networkFailureAddresses))
       }
@@ -1013,7 +1017,7 @@ class MessageProcessor(
       }
 
       val originalMsgData: IncomingMessage.Data = reply.originalMessage.data
-      println("replying to request ${reply.requestId} (${reply::class.simpleName}) after a ${reply.delay} ms delay")
+      println("replying to request ${reply.requestId} (${reply::class.simpleName}) after a ${reply.delay} delay")
       delay(reply.delay)
 
       suspend fun sendMessageToSignald(
@@ -1251,7 +1255,7 @@ infix fun Duration.durationBetween(other: Duration) = (this - other).absoluteVal
  * etc.)
  */
 suspend fun <T> withNewThreadAndTimeoutOrNull(
-  timeoutMillis: Long,
+  timeout: Duration,
   threadGroup: ThreadGroup? = null,
   threadName: String? = null,
   block: () -> T
@@ -1272,7 +1276,7 @@ suspend fun <T> withNewThreadAndTimeoutOrNull(
 
   select {
     deferredResult.onAwait { it }
-    onTimeout(timeoutMillis) {
+    onTimeout(timeout.inWholeMilliseconds) {
       deferredResult.cancel()
       thread?.stop()
       null
