@@ -983,7 +983,7 @@ class MessageProcessor(
     }
 
     val networkFailureAddresses = firstAttemptResponse.results.asSequence()
-      .filter { it.networkFailure == true }
+      .filter { it.networkFailure == true && it.proofRequiredFailure == null }
       .mapNotNull { it.address }
       .toList()
     return if (networkFailureAddresses.isNotEmpty()) {
