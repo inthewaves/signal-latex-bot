@@ -42,7 +42,7 @@ repositories {
 dependencies {
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.3.2")
   implementation("org.inthewaves.kotlin-signald:client-coroutines:0.25.0+signald-0.17.0-10-4c7897e2")
-  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.0")
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.1")
   implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
   implementation("org.scilab.forge:jlatexmath:1.0.7")
   implementation("com.github.ajalt.clikt:clikt:3.4.0")
