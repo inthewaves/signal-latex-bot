@@ -45,7 +45,7 @@ dependencies {
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.0")
   implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
   implementation("org.scilab.forge:jlatexmath:1.0.7")
-  implementation("com.github.ajalt.clikt:clikt:3.4.0")
+  implementation("com.github.ajalt.clikt:clikt:3.4.2")
   implementation("com.google.crypto.tink:tink:1.6.1")
 
   implementation("com.squareup.sqldelight:sqlite-driver:1.5.3")
