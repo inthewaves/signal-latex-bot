@@ -3,7 +3,7 @@
 A Signal bot that replies to incoming messages with LaTeX PNGs via
 [JLaTeXMath](https://github.com/opencollab/jlatexmath).
 
-Try it out by messaging +14046091473 on Signal (https://signal.me/#p/+14046091473).
+The bot is currently inoperable, as it relies on [signald](https://signald.org/) which is now deprecated
 
 The bot can also be added to group chats (you'll have to add the bot to contacts first), where it will generate LaTeX
 PNGs only for messages started with `!latex`, `!tex`, `/latex`, or `/tex`.
